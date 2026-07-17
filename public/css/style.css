@@ -1,0 +1,92 @@
+/* ===============================
+   BASE
+   =============================== */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  overflow: hidden;
+}
+
+/* ===============================
+   APP LAYOUT (FULL SCREEN)
+   =============================== */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;   /* 🔥 แก้ปัญหา mobile 100vh */
+}
+
+/* ===============================
+   TOOLBAR (FIXED TOP)
+   =============================== */
+.toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+
+  height: 60px;
+  z-index: 1000;
+
+  background: rgba(255,255,255,0.97);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* ===============================
+   MAP
+   =============================== */
+#map {
+  flex: 1;
+  width: 100%;
+}
+
+/* ===============================
+   LEAFLET UI SPACING
+   =============================== */
+.leaflet-top.leaflet-left {
+  margin-top: 70px; /* หลบ toolbar */
+  margin-left: 10px;
+}
+.leaflet-top.leaflet-right {
+  margin-top: 70px;
+  margin-right: 10px;
+}
+
+/* ===============================
+   POPUP STYLE
+   =============================== */
+.leaflet-popup-content-wrapper {
+  border-radius: 10px;
+}
+.leaflet-popup-content {
+  font-size: 14px;
+  max-width: 320px;
+}
+.leaflet-popup-content table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.leaflet-popup-content td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #eee;
+}
+
+/* ===============================
+   MOBILE
+   =============================== */
+@media (max-width: 600px) {
+  .toolbar {
+    height: 56px;
+  }
+
+  .leaflet-top.leaflet-left,
+  .leaflet-top.leaflet-right {
+    margin-top: 62px;
+  }
+}
