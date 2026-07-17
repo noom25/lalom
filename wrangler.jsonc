@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lalom",
+  "main": "_worker.js",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "PARCEL_KV",
+      "id": "f5d59bd667e74533a92894342a3e4db1"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
