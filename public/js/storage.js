@@ -19,9 +19,8 @@ async function saveToServer() {
   
   console.log(`💾 Attempting to save ${gj.features.length} features...`);
   
-  // เรียก Cloudflare Worker function
-  const abtParam = encodeURIComponent(window.ABT_CODE || "");
-  const saveUrl = `/api/save?abt=${abtParam}`;
+  // เรียก Netlify Function แทน save.php เดิม
+  const saveUrl = 'save.php';
   
   console.log(`📍 Save URL: ${saveUrl}`);
   

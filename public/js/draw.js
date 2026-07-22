@@ -456,18 +456,6 @@ $("btnSplit").onclick = () => {
   map.on('click', clickHandler);
 };
 
-// Handle line drawing for split
-map.on(L.Draw.Event.CREATED, (e) => {
-  if (splitMode && selectedForSplit && e.layerType === 'polyline') {
-    const line = e.layer;
-    performSplit(selectedForSplit, line);
-    splitMode = false;
-    selectedForSplit = null;
-    return;
-  }
-  
-  // ... existing create code ...
-});
 
 /**
  * Button: Merge parcels

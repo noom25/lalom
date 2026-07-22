@@ -12,7 +12,7 @@ const DATA_แปลงชุมชน = "data/แปลงชุมชน.geojs
 const DATA_BPOINT   = "data/boundarypoint.geojson";
 
 // Map Initial Settings
-const START_CENTER = [14.60332941, 104.06913711];
+const START_CENTER = [14.6005, 104.2500];
 const START_ZOOM   = 15;
 
 // Layer Styles
