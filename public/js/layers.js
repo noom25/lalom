@@ -8,44 +8,116 @@ let parcelGeoJSON;
 /**
  * Build HTML table for popup content
  */
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function buildPropsTable(props = {}) {
   if (!props || Object.keys(props).length === 0) {
-    return '<div class="popup-content"><table><tr><td>ไม่มีข้อมูล</td></tr></table></div>';
+    return '<table class="ptbl"><tr><td>ไม่มีข้อมูล</td></tr></table>';
   }
   
   const keys = Object.keys(props).filter(k => k !== 'geometry');
-  let html = '<div class="popup-content" style="max-height:350px; overflow-y:auto;"><table>';
+  const MAIN_COUNT = 10;
+  const mainKeys = keys.slice(0, MAIN_COUNT);
+  const extraKeys = keys.slice(MAIN_COUNT);
   
-  keys.forEach((k, idx) => {
-    const value = props[k] ?? "-";
-    const display = idx < 8 ? '' : ' style="display:none;" class="extra-field"';
-    html += `<tr${display}><td><b>${k}</b></td><td>${value}</td></tr>`;
+  // ตารางหลัก (แสดงตลอด)
+  let html = '<table class="ptbl">';
+  mainKeys.forEach((k) => {
+    const rawValue = props[k] ?? "-";
+    const safeValue = escapeHtml(rawValue);
+    html += `<tr><td class="ptbl-key"><b>${escapeHtml(k)}</b></td><td class="ptbl-val" title="${safeValue}">${safeValue}</td></tr>`;
   });
-  
   html += '</table>';
   
-  if (keys.length > 9) {
-    html += `<button onclick="toggleExtraFields(this)" style="margin-top:5px;padding:3px 8px;font-size:11px;cursor:pointer;background:#2196F3;color:white;border:none;border-radius:3px;">▼ แสดงเพิ่ม (${keys.length - 8})</button>`;
+  // ฟิลด์เพิ่มเติม: อยู่ในตารางแยก ห่อด้วย div ซ่อนไว้ก่อน
+  // ให้มี scrollbar แนวตั้งเสมอ (จำกัดความสูงไว้) กัน popup ขยายยาวจนล้นจอ
+  // ไม่ว่าจะมีฟิลด์เพิ่มเติมกี่รายการก็ตาม
+  if (extraKeys.length > 0) {
+    // ไม่ใส่ scroll แยกตรงนี้แล้ว ปล่อยให้ popup ทั้งกล่อง (.leaflet-popup-content)
+    // เป็นตัวเลื่อนแทน เพื่อให้เลื่อนได้ทุก field ทั้งแถวหลักและแถวเพิ่มเติมในสโครลเดียวกัน
+    let extraHtml = '<table class="ptbl">';
+    extraKeys.forEach((k) => {
+      const rawValue = props[k] ?? "-";
+      const safeValue = escapeHtml(rawValue);
+      extraHtml += `<tr><td class="ptbl-key"><b>${escapeHtml(k)}</b></td><td class="ptbl-val" title="${safeValue}">${safeValue}</td></tr>`;
+    });
+    extraHtml += '</table>';
+    
+    html += `<div class="ptbl-extra-wrap" style="display:none;">${extraHtml}</div>`;
+    html += `<button onclick="toggleExtraFields(this)" class="ptbl-more">▼ แสดงเพิ่ม (${extraKeys.length})</button>`;
   }
   
-  html += '</div>';
   return html;
 }
 
-// Toggle extra fields
+// Toggle extra fields container (div ที่ห่อ table ของฟิลด์เพิ่มเติม อยู่ก่อนปุ่มเสมอ)
 window.toggleExtraFields = function(btn) {
-  const popup = btn.closest('.popup-content');
-  const extras = popup.querySelectorAll('.extra-field');
-  const isHidden = extras[0].style.display === 'none';
+  const container = btn.previousElementSibling;
+  if (!container || !container.classList.contains('ptbl-extra-wrap')) return;
   
-  extras.forEach(row => row.style.display = isHidden ? 'table-row' : 'none');
-  btn.innerHTML = isHidden ? '▲ ซ่อน' : `▼ แสดงเพิ่ม (${extras.length})`;
+  const isHidden = container.style.display === 'none';
+  const extraCount = container.querySelectorAll('tr').length;
+  
+  container.style.display = isHidden ? 'block' : 'none';
+  btn.innerHTML = isHidden ? '▲ ซ่อนข้อมูล' : `▼ แสดงเพิ่ม (${extraCount})`;
+  btn.classList.toggle('ptbl-more-active', isHidden);
 };
+
+// เพิ่ม style ของเส้นคั่นฟิลด์เพิ่มเติม + scrollbar ของกล่อง popup ทั้งกล่อง
+// (ย้าย scrollbar มาไว้ที่ .leaflet-popup-content แทน เพื่อให้เลื่อนได้ทุก field
+//  ทั้งแถวหลัก (1-8) และแถวเพิ่มเติม (9 ขึ้นไป) ในสโครลบาร์เดียวกัน)
+(function injectExtraFieldScrollStyle() {
+  if (document.getElementById('ptbl-extra-style')) return;
+  const style = document.createElement('style');
+  style.id = 'ptbl-extra-style';
+  style.textContent = `
+    .leaflet-popup-content::-webkit-scrollbar {
+      width: 6px;
+    }
+    .leaflet-popup-content::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .leaflet-popup-content::-webkit-scrollbar-thumb {
+      background: #bbb;
+      border-radius: 3px;
+    }
+    .leaflet-popup-content::-webkit-scrollbar-thumb:hover {
+      background: #999;
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
+// บังคับ style ของ popup ทุกครั้งที่เปิด กัน scrollbar แนวนอนแบบเด็ดขาด
+// ทำงาน "หลังจาก" Leaflet render เสร็จเสมอ จึงชนะ style อื่นๆ ทั้งหมด ไม่ต้องพึ่ง CSS cascade/specificity
+if (typeof map !== 'undefined' && map.on) {
+  map.on('popupopen', function (e) {
+    const el = e.popup.getElement();
+    if (!el) return;
+    const content = el.querySelector('.leaflet-popup-content');
+    if (content) {
+      content.style.setProperty('overflow-x', 'hidden', 'important');
+      content.style.setProperty('overflow-y', 'auto', 'important');
+      content.style.setProperty('max-width', 'min(320px, 85vw)', 'important');
+      // จำกัดความสูงของกล่อง popup ทั้งกล่อง ให้ overflow-y:auto ทำงานจริง
+      // เพื่อให้เลื่อน scrollbar ได้ทุก field (ทั้งแถวหลักและแถวเพิ่มเติม) ไม่ใช่แค่จากแถวที่ 9 ลงไป
+      content.style.setProperty('max-height', '300px', 'important');
+      content.style.setProperty('box-sizing', 'border-box', 'important');
+    }
+  });
+}
 
 /**
  * Load vector layer (polygons/lines)
  */
-async function loadVector(url, style, popupBuilder) {
+async function loadVector(url, style, popupBuilder, layerLabel = "เลเยอร์") {
   try {
     const res = await fetch(url, { 
       cache: "no-store",
@@ -93,6 +165,16 @@ async function loadVector(url, style, popupBuilder) {
               fillColor: '#ff6b6b'
             });
           }
+
+          // แสดงข้อมูลใน sidebar ด้านซ้าย (แบบ LandsPublic)
+          if (typeof window.showParcelSidebar === 'function') {
+            try {
+              const center = layer.getBounds ? layer.getBounds().getCenter() : e.latlng;
+              window.showParcelSidebar(feat.properties, layerLabel, center);
+            } catch (err) {
+              window.showParcelSidebar(feat.properties, layerLabel, e.latlng);
+            }
+          }
         });
         
         // Reset on popup close
@@ -122,7 +204,7 @@ async function loadVector(url, style, popupBuilder) {
 /**
  * Load point layer (circle markers)
  */
-async function loadPoints(url, circleStyle) {
+async function loadPoints(url, circleStyle, layerLabel = "Boundary Point") {
   try {
     const res = await fetch(url, { 
       cache: "no-store",
@@ -164,6 +246,11 @@ async function loadPoints(url, circleStyle) {
               fillColor: '#ff6b6b',
               weight: circleStyle.weight + 1
             });
+          }
+
+          // แสดงข้อมูลใน sidebar ด้านซ้าย (แบบ LandsPublic)
+          if (typeof window.showParcelSidebar === 'function') {
+            window.showParcelSidebar(feat.properties, layerLabel, e.latlng);
           }
         });
         
@@ -234,6 +321,16 @@ function onEachParcel(feature, layer) {
         fillColor: '#ff6b6b'
       });
     }
+
+    // แสดงข้อมูลแปลงนี้ใน sidebar ด้านซ้าย (แบบ LandsPublic)
+    if (typeof window.showParcelSidebar === 'function') {
+      try {
+        const center = layer.getBounds().getCenter();
+        window.showParcelSidebar(feature.properties, "Parcel", center);
+      } catch (err) {
+        window.showParcelSidebar(feature.properties, "Parcel", null);
+      }
+    }
   });
   
   // Reset highlight when popup closes
@@ -260,8 +357,7 @@ async function loadParcels() {
     // 1) ลองโหลดข้อมูลที่เคยบันทึกไว้ผ่าน Netlify Function ก่อน
     //    (ข้อมูลที่วาด/แก้ไขแล้วกด "บันทึก" จะถูกเก็บไว้ที่นี่ ไม่ใช่ไฟล์ data/parcel.geojson เดิม)
     try {
-      const abtParam = encodeURIComponent(window.ABT_CODE || "");
-      const savedRes = await fetch(`/api/load?abt=${abtParam}`, { cache: "no-store" });
+      const savedRes = await fetch('/api/load', { cache: "no-store" });
       if (savedRes.ok) {
         parcelGeoJSON = await savedRes.json();
         console.log("✅ โหลดข้อมูลที่เคยบันทึกไว้ (จาก Netlify Blobs)");
@@ -326,49 +422,49 @@ async function loadAllLayers() {
   await loadParcels();
   
   // Load other layers
-  blockLayer = await loadVector(DATA_BLOCK, STYLES.block);
+  blockLayer = await loadVector(DATA_BLOCK, STYLES.block, null, "Block");
   if (blockLayer) { 
     overlayMaps["Block"] = blockLayer; 
     layersCtl.addOverlay(blockLayer, "Block"); 
   }
   
-  zoneLayer = await loadVector(DATA_ZONE, STYLES.zone);
+  zoneLayer = await loadVector(DATA_ZONE, STYLES.zone, null, "Zone");
   if (zoneLayer) { 
     overlayMaps["Zone"] = zoneLayer; 
     layersCtl.addOverlay(zoneLayer, "Zone"); 
   }
   
-  boundaryLayer = await loadVector(DATA_BOUNDARY, STYLES.boundary);
+  boundaryLayer = await loadVector(DATA_BOUNDARY, STYLES.boundary, null, "Boundary");
   if (boundaryLayer) { 
     overlayMaps["Boundary"] = boundaryLayer; 
     layersCtl.addOverlay(boundaryLayer, "Boundary"); 
   }
   
-  buildingLayer = await loadVector(DATA_BUILDING, STYLES.building);
+  buildingLayer = await loadVector(DATA_BUILDING, STYLES.building, null, "Building");
   if (buildingLayer) { 
     overlayMaps["Building"] = buildingLayer; 
     layersCtl.addOverlay(buildingLayer, "Building"); 
   }
   
-  spkLayer = await loadVector(DATA_SPK, STYLES.spk);
+  spkLayer = await loadVector(DATA_SPK, STYLES.spk, null, "SPK");
   if (spkLayer) { 
     overlayMaps["SPK"] = spkLayer; 
     layersCtl.addOverlay(spkLayer, "SPK"); 
   }
   
-  แปลงชุมชนLayer = await loadVector(DATA_แปลงชุมชน, STYLES.community);
+  แปลงชุมชนLayer = await loadVector(DATA_แปลงชุมชน, STYLES.community, null, "แปลงชุมชน");
   if (แปลงชุมชนLayer) { 
     overlayMaps["แปลงชุมชน"] = แปลงชุมชนLayer; 
     layersCtl.addOverlay(แปลงชุมชนLayer, "แปลงชุมชน"); 
   }
   
-  แปลงเกษตรLayer = await loadVector(DATA_แปลงเกษตร, STYLES.agriculture);
+  แปลงเกษตรLayer = await loadVector(DATA_แปลงเกษตร, STYLES.agriculture, null, "แปลงเกษตร");
   if (แปลงเกษตรLayer) { 
     overlayMaps["แปลงเกษตร"] = แปลงเกษตรLayer; 
     layersCtl.addOverlay(แปลงเกษตรLayer, "แปลงเกษตร"); 
   }
   
-  boundaryPointLayer = await loadPoints(DATA_BPOINT, STYLES.boundaryPoint);
+  boundaryPointLayer = await loadPoints(DATA_BPOINT, STYLES.boundaryPoint, "Boundary Point");
   if (boundaryPointLayer) { 
     overlayMaps["Boundary Point"] = boundaryPointLayer; 
     layersCtl.addOverlay(boundaryPointLayer, "Boundary Point"); 
