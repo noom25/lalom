@@ -20,7 +20,7 @@ async function saveToServer() {
   console.log(`💾 Attempting to save ${gj.features.length} features...`);
   
   // เรียก Netlify Function แทน save.php เดิม
-  const saveUrl = 'save.php';
+  const saveUrl = '/api/save';
   
   console.log(`📍 Save URL: ${saveUrl}`);
   
