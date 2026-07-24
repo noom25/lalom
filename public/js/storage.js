@@ -20,7 +20,7 @@ async function saveToServer() {
   console.log(`💾 Attempting to save ${gj.features.length} features...`);
   
   // เรียก Cloudflare Worker (ต้องระบุ abt เสมอ ไม่งั้น worker จะปฏิเสธด้วย 400)
-  
+  const saveUrl = '/api/save?abt=lalom';
   
   console.log(`📍 Save URL: ${saveUrl}`);
   
