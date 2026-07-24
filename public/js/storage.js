@@ -19,8 +19,8 @@ async function saveToServer() {
   
   console.log(`💾 Attempting to save ${gj.features.length} features...`);
   
-  // เรียก Netlify Function แทน save.php เดิม
-  const saveUrl = '/api/save';
+  // เรียก Cloudflare Worker (ต้องระบุ abt เสมอ ไม่งั้น worker จะปฏิเสธด้วย 400)
+  const saveUrl = '/api/save?abt=lalom';
   
   console.log(`📍 Save URL: ${saveUrl}`);
   
@@ -35,7 +35,15 @@ async function saveToServer() {
     });
     
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      // พยายามอ่าน error message จริงจาก worker (เช่น "ไม่ระบุ อบต. ...")
+      let serverMsg = `HTTP ${res.status}`;
+      try {
+        const errBody = await res.json();
+        if (errBody && errBody.error) serverMsg = errBody.error;
+      } catch (_) {
+        // response ไม่ใช่ JSON ก็ปล่อยผ่าน ใช้ serverMsg เดิม
+      }
+      throw new Error(serverMsg);
     }
     
     const result = await res.json();
