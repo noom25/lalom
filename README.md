@@ -297,5 +297,15 @@ const ALLOWED_ABT = ["lalom", "ltaxmap", "รหัสอบตใหม่"];
 - [ ] ถ้ามีมากกว่า 1 อบต. → ลองสลับ `ABT_CODE` แล้วเช็คว่าข้อมูลแต่ละ อบต. ไม่ปนกัน
 
 ---
+### การเพิ่ม อบต แก้ไขใน worker,layer,storage
+_worker.js → เพิ่มรหัส อบต. ต่อท้ายในลิสต์ ALLOWED_ABT (และเปลี่ยน PARCEL_KV เป็น KV_BINDING ให้ตรงกับ binding ของ project map)
+storage.js → เติม ?abt=<รหัสอบต.นั้น> ต่อท้าย /api/save
+layers.js → เติม ?abt=<รหัสอบต.นั้น> ต่อท้าย /api/load
+ตัวอย่าง
+#layer# // const savedRes = await fetch('/api/load?abt=lalom', { cache: "no-store" });
+#storage#// เรียก Cloudflare Worker (ต้องระบุ abt เสมอ ไม่งั้น worker จะปฏิเสธด้วย 400)
+  const saveUrl = '/api/save?abt=lalom';
+
+*(เพิ่มแถวใหม่ทุกครั้งที่ติดตั้งให้ อบต. เพิ่ม)*
 
 *เอกสารนี้จัดทำขึ้นจากประสบการณ์ตั้งค่าจริงของโปรเจกต์ `noom25/lalom` — อัปเดตล่าสุดตามสถานะระบบล่าสุดที่ deploy สำเร็จ*
