@@ -280,6 +280,36 @@ async function loadPoints(url, circleStyle, layerLabel = "Boundary Point") {
 }
 
 /**
+ * 🔧 FIX (วาด/แก้ไขแปลงโดยไม่ต้องติ๊กปิด layer อื่น):
+ * เดิมต้อง "ติ๊กปิด" layer อื่น (Zone/Block/Boundary/ฯลฯ) ก่อนวาด/เลือกแปลง เพราะ
+ * layer เหล่านี้ยังกิน click ได้แม้ fillOpacity เป็น 0 (hit-test เป็น geometry
+ * ไม่ใช่พิกเซล เหมือนที่แก้ไว้ตอน bringToFront ของ parcelLayer ด้านล่าง) ทำให้คลิก
+ * วางจุดโพลิกอน/เลือกแปลงไปโดน layer อื่นแทน
+ *
+ * แก้โดยปิด "ความสามารถกิน click" (options.interactive) ของ layer อ้างอิงเหล่านี้
+ * ชั่วคราวระหว่างอยู่ในโหมดวาด/แก้ไข/แบ่ง/รวม โดยที่ตัว layer ยังคง "แสดงผล" อยู่บน
+ * แผนที่ตามปกติ (ไม่ต้องเอาออกจาก map ไม่ต้องติ๊กปิด) เพราะแผนที่ใช้ preferCanvas
+ * ซึ่ง Leaflet เช็ค options.interactive แบบสดๆ ทุกครั้งที่คลิก จึงสลับเปิด/ปิดได้ทันที
+ * โดยไม่ต้องโหลด/วาด layer ใหม่
+ */
+function getReferenceLayers() {
+  return [
+    blockLayer, zoneLayer, boundaryLayer, buildingLayer, spkLayer,
+    แปลงชุมชนLayer, แปลงเกษตรLayer, boundaryPointLayer
+  ].filter(Boolean);
+}
+
+function setReferenceLayersInteractive(interactive) {
+  getReferenceLayers().forEach(group => {
+    if (group && typeof group.eachLayer === 'function') {
+      group.eachLayer(l => {
+        if (l && l.options) l.options.interactive = interactive;
+      });
+    }
+  });
+}
+
+/**
  * Handler for each parcel feature
  */
 function onEachParcel(feature, layer) {
@@ -357,7 +387,7 @@ async function loadParcels() {
     // 1) ลองโหลดข้อมูลที่เคยบันทึกไว้ผ่าน Netlify Function ก่อน
     //    (ข้อมูลที่วาด/แก้ไขแล้วกด "บันทึก" จะถูกเก็บไว้ที่นี่ ไม่ใช่ไฟล์ data/parcel.geojson เดิม)
     try {
-      const savedRes = await fetch('/api/load?abt=lalom', { cache: "no-store" });
+      const savedRes = await fetch('/api/load', { cache: "no-store" });
       if (savedRes.ok) {
         parcelGeoJSON = await savedRes.json();
         console.log("✅ โหลดข้อมูลที่เคยบันทึกไว้ (จาก Netlify Blobs)");
@@ -468,6 +498,16 @@ async function loadAllLayers() {
   if (boundaryPointLayer) { 
     overlayMaps["Boundary Point"] = boundaryPointLayer; 
     layersCtl.addOverlay(boundaryPointLayer, "Boundary Point"); 
+  }
+  
+  // 🔧 FIX: นำ Parcel layer มาไว้ "บนสุด" ในลำดับการชิง click event
+  // เนื่องจากใช้ preferCanvas + layer อื่น (Zone/Block/Boundary/ฯลฯ) มักครอบพื้นที่
+  // เดียวกันกับ Parcel และถูกโหลดทีหลัง ทำให้แย่ง click ไปก่อนแม้ fillOpacity เป็น 0
+  // (มองไม่เห็นแต่ยังกิน click ได้ เพราะ hit-test เป็น geometry ไม่ใช่พิกเซล)
+  // ผลคือผู้ใช้กดเลือกแปลงเพื่อแก้ไข/แบ่ง/รวม ไม่ติดง่ายๆ ต้องคลิกซ้ำหลายครั้ง
+  if (parcelLayer && parcelLayer.bringToFront) {
+    parcelLayer.bringToFront();
+    console.log("🔼 นำ Parcel layer มาไว้บนสุด (แก้ปัญหากดเลือกแปลงยาก)");
   }
   
   console.log("✅ All layers loaded");

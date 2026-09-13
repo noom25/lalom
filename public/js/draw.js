@@ -65,6 +65,124 @@ let activeEdit = null;
 let selectedForMerge = [];
 let splitMode = false;
 
+// 🔧 FIX (ประสิทธิภาพ): เก็บเฉพาะ layer ที่ถูกเปลี่ยนสีไว้จริง (ตอนเลือกแปลงเพื่อ
+// แบ่ง/รวม/แก้ไขข้อมูล) แทนที่จะวน editableGroup ทั้งหมด (เป็นพันแปลง) ทุกครั้งที่กด
+// "หยุด"/"รีเซ็ต" — เดิมวนทุกแปลงทำให้ resetAllModes() ค้างหลายวินาที (เจอ [Violation]
+// 'click' handler took 4335ms ใน console) เพราะ setStyle ของ Leaflet ต้องอัปเดต DOM/Canvas
+// ทีละแปลง ยิ่งข้อมูลเยอะยิ่งช้า
+let styledLayers = new Set();
+
+// 🔧 FIX (เสถียรภาพ): เก็บ reference ของ map click handler ปัจจุบันไว้ตัวเดียว
+// เดิมหลายจุดเรียก map.off('click') แบบไม่ระบุ handler ซึ่งจะลบ click listener
+// ของ "ทุกโมดูล" ที่ผูกกับแผนที่ ไม่ใช่แค่ของโหมดวาด/แบ่ง/รวมเท่านั้น
+let activeMapClickHandler = null;
+function setMapClickHandler(handler) {
+  if (activeMapClickHandler) {
+    map.off('click', activeMapClickHandler);
+  }
+  activeMapClickHandler = handler || null;
+  if (handler) {
+    map.on('click', handler);
+  }
+}
+
+// 🔧 FIX (เสถียรภาพ): เก็บ handler ของโหมด "แก้ไขข้อมูล" ไว้ระดับโมดูล เพื่อล้างก่อน
+// ผูกชุดใหม่ทุกครั้ง เดิมถ้ากดปุ่ม "แก้ไขข้อมูล" ซ้ำโดยยังไม่ได้คลิกแปลงไหนเลย จะมี
+// handler ซ้อนกันหลายชุด คลิกแปลงทีเดียวเจอ prompt วนซ้ำ
+let editModeHandlers = [];
+function clearEditModeHandlers() {
+  editModeHandlers.forEach(h => h.layer.off('click', h.handler));
+  editModeHandlers = [];
+}
+
+// 🔧 FIX (เลือกแปลงผิดตัว): เดิมเช็คแค่ "กรอบสี่เหลี่ยมล้อมรอบ" (getBounds().contains)
+// ไม่ใช่รูปทรงจริงของแปลง ถ้าแปลงข้างเคียงอยู่ติดกัน/เอียง กรอบจะซ้อนทับกัน คลิกมุมแปลง
+// หนึ่งอาจไปโดนอีกแปลงแทน ฟังก์ชันนี้เช็ครูปทรงจริงด้วย turf ก่อน ถ้าไม่โดนตัวไหนพอดี
+// (เช่น คลิกเฉียดขอบแปลงเล็ก) ค่อย fallback ไปหาแปลงที่ใกล้ที่สุดในระยะที่กำหนด เหมือนเดิม
+function pointInLayer(latlng, layer) {
+  try {
+    if (window.turf && layer.toGeoJSON) {
+      const geo = layer.toGeoJSON();
+      if (geo.geometry && (geo.geometry.type === 'Polygon' || geo.geometry.type === 'MultiPolygon')) {
+        const pt = turf.point([latlng.lng, latlng.lat]);
+        return turf.booleanPointInPolygon(pt, geo);
+      }
+    }
+  } catch (e) {
+    // คำนวณไม่ได้ (ข้อมูลรูปทรงไม่สมบูรณ์) ให้ fallback ไปเช็คกรอบสี่เหลี่ยมแทน
+  }
+  return layer.getBounds ? layer.getBounds().contains(latlng) : false;
+}
+
+function findParcelAt(latlng, group, maxNearDist = 90) {
+  // 1) เช็คจุดตกในรูปทรงจริงก่อน (แม่นยำสุด)
+  const exactMatches = [];
+  group.eachLayer(layer => {
+    if (pointInLayer(latlng, layer)) exactMatches.push(layer);
+  });
+
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1) {
+    // เคสซ้อนกันพอดี (หายาก) เลือกตัวที่จุดศูนย์กลางใกล้สุด
+    let best = null, bestDist = Infinity;
+    exactMatches.forEach(layer => {
+      const d = latlng.distanceTo(layer.getBounds().getCenter());
+      if (d < bestDist) { bestDist = d; best = layer; }
+    });
+    return best;
+  }
+
+  // 2) ไม่โดนตัวไหนพอดี (คลิกเฉียดขอบ) → หาแปลงที่ใกล้สุดในระยะที่กำหนด เหมือนพฤติกรรมเดิม
+  let closestLayer = null, minDist = Infinity;
+  group.eachLayer(layer => {
+    if (!layer.getBounds) return;
+    const dist = latlng.distanceTo(layer.getBounds().getCenter());
+    if (dist < maxNearDist && dist < minDist) {
+      minDist = dist;
+      closestLayer = layer;
+    }
+  });
+  return closestLayer;
+}
+
+// 🔧 FIX (เสถียรภาพ): จุดรีเซ็ตกลางจุดเดียว เดิมปุ่มเปิดโหมดแต่ละปุ่ม (วาด/แก้ไขข้อมูล/
+// แบ่ง/รวม) reset แค่ตัวแปรของโหมดตัวเอง ทำให้สลับปุ่มระหว่างทำงานโดยไม่กด "หยุด" ก่อน
+// มี handler ของโหมดเก่าค้างซ้อนได้ ตอนนี้ทุกปุ่มเรียกจุดนี้ก่อนเริ่มโหมดใหม่เสมอ
+function resetAllModes() {
+  if (activeEdit) {
+    if (typeof activeEdit.disable === 'function') activeEdit.disable();
+    activeEdit = null;
+  }
+  clearEditModeHandlers();
+
+  splitMode = false;
+  selectedForSplit = null;
+
+  setMapClickHandler(null);
+
+  // 🔧 FIX (ประสิทธิภาพ): รีเซ็ตสีเฉพาะแปลงที่เคยถูกไฮไลท์จริง (เร็วขึ้นมาก โดยเฉพาะ
+  // ข้อมูลที่มีเป็นพันแปลง) แทนการวนทุกแปลงใน editableGroup
+  styledLayers.forEach(layer => {
+    if (layer.setStyle) {
+      layer.setStyle({
+        color: layer.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+    }
+  });
+  styledLayers.clear();
+
+  selectedForMerge = [];
+  map.closePopup();
+
+  // 🔧 FIX: คืนค่าให้ layer อ้างอิง (Zone/Block/Boundary/ฯลฯ) กิน click ได้ตามปกติ
+  // เมื่อไม่มีโหมดวาด/แก้ไข/แบ่ง/รวมทำงานอยู่แล้ว (ดู setReferenceLayersInteractive ใน layers.js)
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(true);
+  }
+}
+
 /**
  * Handle feature creation
  */
@@ -75,10 +193,12 @@ map.on(L.Draw.Event.CREATED, (e) => {
     performSplit(selectedForSplit, line);
     splitMode = false;
     selectedForSplit = null;
+    activeEdit = null; // 🔧 FIX: วาดเส้นตัดเสร็จแล้ว เคลียร์ reference ที่เก็บไว้ให้ resetAllModes()
     return;
   }
   
   const layer = e.layer;
+  activeEdit = null; // 🔧 FIX: วาดแปลงเสร็จแล้ว (Leaflet.Draw ปิดโหมดของตัวเองอัตโนมัติ) เคลียร์ reference ด้วย
   
   // Initialize feature properties
   layer.feature = layer.feature || { 
@@ -178,6 +298,12 @@ map.on(L.Draw.Event.CREATED, (e) => {
   });
   
   console.log("✅ Created:", layer.feature.properties.parcel_code);
+
+  // 🔧 FIX: วาดแปลงเสร็จแล้ว (leaflet.draw ปิดโหมดวาดของตัวเองอัตโนมัติ) คืนค่าให้
+  // layer อื่นกิน click ได้ตามปกติ
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(true);
+  }
 });
 
 /**
@@ -221,7 +347,16 @@ map.on(L.Draw.Event.DELETED, (e) => {
  * Button: Draw new polygon
  */
 $("btnDraw").onclick = () => {
-  new L.Draw.Polygon(map, drawControl.options.draw.polygon).enable();
+  resetAllModes();
+  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(false);
+  }
+  // 🔧 FIX (กด "หยุด"/Reset แล้วโหมดวาดยังค้าง): เก็บ instance ไว้ที่ activeEdit
+  // เหมือนกับโหมดอื่นๆ ให้ resetAllModes() สั่ง .disable() ปิดโหมดวาดได้จริง
+  // (เดิมสร้างลอยๆ ไม่ได้เก็บไว้ที่ไหน resetAllModes() เลยหาตัวสั่งปิดไม่เจอ)
+  activeEdit = new L.Draw.Polygon(map, drawControl.options.draw.polygon);
+  activeEdit.enable();
   console.log("🟢 Draw mode activated");
   alert("โหมดวาดแปลง\nคลิกบนแผนที่เพื่อวาดรูปหลายเหลี่ยม");
 };
@@ -230,23 +365,47 @@ $("btnDraw").onclick = () => {
  * Button: Edit feature properties
  */
 $("btnEdit").onclick = () => {
+  // ล้างโหมดอื่นที่อาจค้างอยู่ก่อน (วาด/แบ่ง/รวม) + handler แก้ไขข้อมูลของรอบก่อน
+  resetAllModes();
+  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(false);
+  }
+
   alert("โหมดแก้ไขข้อมูล\nคลิกที่แปลงเพื่อแก้ไขข้อมูล");
   
   // Add ONE-TIME click handler to each layer
-  const handlers = [];
-  
   editableGroup.eachLayer(layer => {
     if (!layer.feature) return;
     
     const clickHandler = function(e) {
       L.DomEvent.stopPropagation(e);
-      
+
+      // 🔧 FIX (คลิกผิดแปลงแล้วต้องไล่กด Cancel ทีละช่องจนครบ): เดิมถ้าคลิกผิดแปลง
+      // ต้องกด Cancel ใน prompt "zone" ก่อนถึงจะยกเลิกได้ (เพราะ prompt() บล็อกทั้ง
+      // หน้าเว็บ กดปุ่ม "หยุด" ระหว่างนั้นไม่ได้เลย) เพิ่มกล่องยืนยันแปลงไว้ตัวแรกสุด
+      // เพื่อให้กด Cancel เพียงครั้งเดียวก็ออกจากโหมดแก้ไขของแปลงนี้ได้ทันที
+      const props = layer.feature.properties;
+      const confirmEdit = confirm(
+        `แก้ไขข้อมูลแปลง: ${props.parcel_code || "(ไม่มีรหัส)"}\n\n` +
+        `ใช่แปลงที่ต้องการหรือไม่?\n` +
+        `(กด OK = ใช่ แก้ไขต่อ, Cancel = ไม่ใช่ คลิกแปลงใหม่)`
+      );
+      if (!confirmEdit) {
+        layer.setStyle({
+          color: layer.defaultColor || STYLES.parcel.color,
+          weight: 1.4
+        });
+        // ผูก handler ของแปลงนี้กลับคืน เผื่อผู้ใช้ต้องการคลิกแปลงนี้ใหม่อีกครั้ง
+        editModeHandlers.push({ layer: layer, handler: clickHandler });
+        layer.once('click', clickHandler);
+        return;
+      }
+
       // Highlight
       layer.setStyle({ color: 'blue', weight: 3 });
-      
-      // Get current properties
-      const props = layer.feature.properties;
-      
+      styledLayers.add(layer);
+
       // Prompt for each field
       const zone = prompt("zone:", props.zone || "");
       if (zone === null) {
@@ -254,7 +413,7 @@ $("btnEdit").onclick = () => {
           color: layer.defaultColor || STYLES.parcel.color, 
           weight: 1.4 
         });
-        removeAllHandlers();
+        clearEditModeHandlers();
         return;
       }
       
@@ -264,7 +423,7 @@ $("btnEdit").onclick = () => {
           color: layer.defaultColor || STYLES.parcel.color, 
           weight: 1.4 
         });
-        removeAllHandlers();
+        clearEditModeHandlers();
         return;
       }
       
@@ -274,7 +433,7 @@ $("btnEdit").onclick = () => {
           color: layer.defaultColor || STYLES.parcel.color, 
           weight: 1.4 
         });
-        removeAllHandlers();
+        clearEditModeHandlers();
         return;
       }
       
@@ -284,7 +443,7 @@ $("btnEdit").onclick = () => {
           color: layer.defaultColor || STYLES.parcel.color, 
           weight: 1.4 
         });
-        removeAllHandlers();
+        clearEditModeHandlers();
         return;
       }
       
@@ -325,20 +484,13 @@ $("btnEdit").onclick = () => {
       console.log("✅ Properties updated:", parcelCode);
       
       // Remove all handlers after edit
-      removeAllHandlers();
+      clearEditModeHandlers();
     };
     
     // Store handler reference
-    handlers.push({ layer: layer, handler: clickHandler });
+    editModeHandlers.push({ layer: layer, handler: clickHandler });
     layer.once('click', clickHandler); // Use 'once' for one-time only
   });
-  
-  // Function to remove all handlers
-  function removeAllHandlers() {
-    handlers.forEach(h => {
-      h.layer.off('click', h.handler);
-    });
-  }
   
   console.log("✏️ Edit data mode activated (one-time)");
 };
@@ -347,30 +499,13 @@ $("btnEdit").onclick = () => {
  * Button: Stop edit mode
  */
 $("btnStop").onclick = () => {
-  if (activeEdit) {
-    activeEdit.disable();
-    activeEdit = null;
-  }
-  
-  // Reset split mode
-  splitMode = false;
-  selectedForSplit = null;
-  map.off('click');
-  
-  // Reset colors
-  editableGroup.eachLayer(layer => {
-    if (layer.setStyle) {
-      layer.setStyle({ 
-        color: layer.defaultColor || STYLES.parcel.color, 
-        weight: 1.4 
-      });
-    }
-  });
-  
-  selectedForMerge = [];
-  
+  resetAllModes();
   console.log("⛔ All modes stopped");
-  alert("หยุดโหมดแก้ไข");
+  // 🔧 FIX (ค้าง/ไม่คืนค่า): เอา alert() ออกจากปุ่มนี้ เพราะ alert() เป็นคำสั่ง
+  // "บล็อก" การทำงานทั้งหมดจนกว่าจะกด OK — เวลาที่เห็นใน console ว่า handler ใช้เวลา
+  // เป็นวินาที ส่วนใหญ่คือเวลาที่รอผู้ใช้กด OK ไม่ใช่โค้ดทำงานช้า และทำให้รู้สึกเหมือน
+  // ปุ่ม "หยุด" ไม่ตอบสนอง ทั้งที่จริงๆ รีเซ็ตเสร็จตั้งแต่ก่อนเรียก alert() แล้ว
+  // ปุ่มนี้ควรเร็วและไม่ต้องกดอะไรเพิ่ม เพราะมีไว้ให้กู้สถานะตอนติดขัด
 };
 
 // Selected parcel for split
@@ -385,20 +520,12 @@ $("btnSplit").onclick = () => {
     return;
   }
   
-  // Force reset everything first
-  map.off('click');
-  splitMode = false;
-  selectedForSplit = null;
-  
-  // Clear any stuck styles
-  editableGroup.eachLayer(layer => {
-    if (layer.setStyle) {
-      layer.setStyle({ 
-        color: layer.defaultColor || STYLES.parcel.color, 
-        weight: 1.4 
-      });
-    }
-  });
+  // Force reset everything first (โหมดอื่นด้วย ไม่ใช่แค่ split)
+  resetAllModes();
+  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(false);
+  }
   
   // Now start split mode
   splitMode = true;
@@ -407,53 +534,42 @@ $("btnSplit").onclick = () => {
   console.log("✂️ Split mode: waiting for parcel selection");
   
   // Click to select parcel
+  // 🔧 FIX: เดิมเช็คแค่กรอบสี่เหลี่ยมล้อมรอบ เปลี่ยนมาใช้ findParcelAt() ที่เช็ครูปทรงจริงก่อน
+  // (กันเลือกผิดแปลงตอนแปลงข้างเคียงอยู่ชิดกัน) แล้วค่อย fallback ระยะใกล้สุดเหมือนเดิม
   const clickHandler = (e) => {
-    let found = false;
-    let closestLayer = null;
-    let minDist = Infinity;
+    const closestLayer = findParcelAt(e.latlng, editableGroup);
     
-    // Find closest parcel
-    editableGroup.eachLayer(layer => {
-      if (layer.getBounds) {
-        const bounds = layer.getBounds();
-        const center = bounds.getCenter();
-        const dist = e.latlng.distanceTo(center);
-        
-        // Check if click is inside or near (within 50m)
-        if (bounds.contains(e.latlng) || dist < 50) {
-          if (dist < minDist) {
-            minDist = dist;
-            closestLayer = layer;
-            found = true;
-          }
-        }
-      }
-    });
-    
-    if (found && closestLayer) {
+    if (closestLayer) {
       selectedForSplit = closestLayer;
       closestLayer.setStyle({ color: 'orange', weight: 3 });
+      styledLayers.add(closestLayer);
       
       console.log("✅ Parcel selected, draw line to split");
       alert("เลือกแปลงแล้ว ✓\nวาดเส้นตัดผ่านแปลง");
       
       // Enable line drawing
-      new L.Draw.Polyline(map, {
+      // 🔧 FIX (กด "หยุด"/Reset แล้วโหมดวาดเส้นยังค้าง): เดิมสร้าง L.Draw.Polyline
+      // ลอยๆ ไม่ได้เก็บ reference ไว้ที่ activeEdit ทำให้ resetAllModes() หาตัวสั่ง
+      // .disable() ไม่เจอ (activeEdit เป็น null อยู่ตลอด) โหมดวาดเส้นเลยยังทำงาน
+      // อยู่เบื้องหลังแม้สีแปลงจะรีเซ็ตกลับปกติแล้วก็ตาม ตอนนี้เก็บ instance ไว้ที่
+      // activeEdit ให้ resetAllModes() สั่งปิดได้จริง
+      activeEdit = new L.Draw.Polyline(map, {
         shapeOptions: {
           color: 'red',
           weight: 3,
           dashArray: '10, 10'
         }
-      }).enable();
+      });
+      activeEdit.enable();
       
-      map.off('click', clickHandler);
+      setMapClickHandler(null);
     } else {
       console.log("⚠️ No parcel found. Click closer to parcel.");
       alert("ไม่พบแปลง\nคลิกใกล้ๆ แปลงมากขึ้น");
     }
   };
   
-  map.on('click', clickHandler);
+  setMapClickHandler(clickHandler);
 };
 
 
@@ -466,58 +582,51 @@ $("btnMerge").onclick = () => {
     return;
   }
   
-  // Reset
-  selectedForMerge = [];
-  map.off('click');
-  
-  // Clear styles
-  editableGroup.eachLayer(layer => {
-    if (layer.setStyle) {
-      layer.setStyle({ 
-        color: layer.defaultColor || STYLES.parcel.color, 
-        weight: 1.4 
-      });
-    }
-  });
+  // Reset (โหมดอื่นด้วย ไม่ใช่แค่ merge)
+  resetAllModes();
+  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
+  if (typeof setReferenceLayersInteractive === 'function') {
+    setReferenceLayersInteractive(false);
+  }
   
   alert("โหมดรวมแปลง\nคลิกเลือกแปลง 2 แปลงขึ้นไป\nแล้วกดปุ่ม 'รวมแปลง' อีกครั้ง");
   console.log("🔗 Merge mode: select parcels");
   
   // Click to select
+  // 🔧 FIX: เดิมเช็คแค่กรอบสี่เหลี่ยมล้อมรอบ และเลือก "ตัวแรกที่เจอ" ตามลำดับ loop เท่านั้น
+  // (ไม่ได้เทียบระยะเลย) ทำให้แปลงติดกันเลือกผิดตัวได้ง่าย เปลี่ยนมาใช้ findParcelAt()
   const mergeClickHandler = (e) => {
-    let found = false;
-    editableGroup.eachLayer(layer => {
-      if (!found && layer.getBounds && layer.getBounds().contains(e.latlng)) {
-        found = true;
-        
-        if (selectedForMerge.includes(layer)) {
-          // Deselect
-          layer.setStyle({ 
-            color: layer.defaultColor || STYLES.parcel.color, 
-            weight: 1.4 
-          });
-          selectedForMerge = selectedForMerge.filter(l => l !== layer);
-          console.log(`❌ Deselected. Total: ${selectedForMerge.length}`);
-        } else {
-          // Select
-          layer.setStyle({ color: 'blue', weight: 3 });
-          selectedForMerge.push(layer);
-          console.log(`✅ Selected. Total: ${selectedForMerge.length}`);
-        }
-        
-        // Auto merge if have 2+
-        if (selectedForMerge.length >= 2) {
-          const confirm = window.confirm(`เลือกแล้ว ${selectedForMerge.length} แปลง\nรวมเลยไหม?`);
-          if (confirm) {
-            map.off('click', mergeClickHandler);
-            performMerge();
-          }
-        }
+    const layer = findParcelAt(e.latlng, editableGroup);
+    if (!layer) return;
+
+    if (selectedForMerge.includes(layer)) {
+      // Deselect
+      layer.setStyle({ 
+        color: layer.defaultColor || STYLES.parcel.color, 
+        weight: 1.4 
+      });
+      styledLayers.delete(layer);
+      selectedForMerge = selectedForMerge.filter(l => l !== layer);
+      console.log(`❌ Deselected. Total: ${selectedForMerge.length}`);
+    } else {
+      // Select
+      layer.setStyle({ color: 'blue', weight: 3 });
+      styledLayers.add(layer);
+      selectedForMerge.push(layer);
+      console.log(`✅ Selected. Total: ${selectedForMerge.length}`);
+    }
+
+    // Auto merge if have 2+
+    if (selectedForMerge.length >= 2) {
+      const confirm = window.confirm(`เลือกแล้ว ${selectedForMerge.length} แปลง\nรวมเลยไหม?`);
+      if (confirm) {
+        setMapClickHandler(null);
+        performMerge();
       }
-    });
+    }
   };
   
-  map.on('click', mergeClickHandler);
+  setMapClickHandler(mergeClickHandler);
 };
 
 /**
@@ -532,7 +641,7 @@ function performSplit(polygon, line) {
 
     // Buffer line นิดหน่อยเพื่อตัดให้ขาด
     console.log("📏 Buffering line...");
-    const buffered = turf.buffer(lineGeo, 0.0001, { units: 'kilometers' });
+    const buffered = turf.buffer(lineGeo, 0.0005, { units: 'kilometers' });
 
     // แบ่งแปลง
     console.log("✂️ Splitting polygon...");
@@ -544,8 +653,8 @@ function performSplit(polygon, line) {
     }
 
     // ลบแปลงเดิม
-    editableGroup.removeLayer(polygon);
-    if (parcelLayer) parcelLayer.removeLayer(polygon);
+    if (editableGroup.hasLayer(polygon)) editableGroup.removeLayer(polygon);
+    if (parcelLayer && parcelLayer.hasLayer(polygon)) parcelLayer.removeLayer(polygon);
 
     // แปลงผลลัพธ์เป็น array ของ coordinates (รองรับทั้ง Polygon และ MultiPolygon)
     const parts = split.geometry.type === 'MultiPolygon'
@@ -607,6 +716,11 @@ function performSplit(polygon, line) {
     alert("เกิดข้อผิดพลาดในการแบ่งแปลง\n" + (e.message || e));
     splitMode = false;
     selectedForSplit = null;
+  } finally {
+    // 🔧 FIX: จบโหมดแบ่งแปลง (สำเร็จหรือ error) คืนค่าให้ layer อื่นกิน click ได้ตามปกติ
+    if (typeof setReferenceLayersInteractive === 'function') {
+      setReferenceLayersInteractive(true);
+    }
   }
 }
 
@@ -836,7 +950,7 @@ function performMerge() {
 
     // Step 11: ลบแปลงเดิมทั้งหมด
     validLayers.forEach(layer => {
-      editableGroup.removeLayer(layer);
+      if (editableGroup.hasLayer(layer)) editableGroup.removeLayer(layer);
       if (parcelLayer && parcelLayer.hasLayer(layer)) {
         parcelLayer.removeLayer(layer);
       }
@@ -862,20 +976,26 @@ function performMerge() {
     console.error("❌ Merge ล้มเหลว:", err);
     alert("❌ ไม่สามารถรวมแปลงได้\n\n" + err.message);
 
-    // รีเซ็ตสถานะและสี
-    if (editableGroup) {
-      editableGroup.eachLayer(layer => {
-        if (layer.setStyle && typeof layer.setStyle === 'function') {
-          layer.setStyle({
-            color: layer.defaultColor || STYLES.parcel.color,
-            weight: 1.4,
-            fillOpacity: 0.2
-          });
-        }
-      });
-    }
+    // 🔧 FIX (ประสิทธิภาพ): รีเซ็ตเฉพาะแปลงที่เลือกไว้สำหรับรวมครั้งนี้ (selectedForMerge)
+    // แทนการวนทุกแปลงใน editableGroup (เดิมช้ามากถ้าข้อมูลมีเป็นพันแปลง)
+    // (เดิมยังรีเซ็ต fillOpacity เป็น 0.2 ซึ่งไม่ตรงกับค่าปกติของแปลง (0) ด้วย แก้ให้ตรงกัน)
+    selectedForMerge.forEach(layer => {
+      if (layer.setStyle && typeof layer.setStyle === 'function') {
+        layer.setStyle({
+          color: layer.defaultColor || STYLES.parcel.color,
+          weight: 1.4,
+          fillOpacity: 0
+        });
+      }
+      styledLayers.delete(layer);
+    });
     
     selectedForMerge = [];
+  } finally {
+    // 🔧 FIX: จบโหมดรวมแปลง (สำเร็จหรือ error) คืนค่าให้ layer อื่นกิน click ได้ตามปกติ
+    if (typeof setReferenceLayersInteractive === 'function') {
+      setReferenceLayersInteractive(true);
+    }
   }
 }
 
@@ -883,38 +1003,9 @@ function performMerge() {
  * Button: Reset/Cancel all modes
  */
 $("btnDelete").onclick = () => {
-  // Stop all edit modes
-  if (activeEdit) {
-    activeEdit.disable();
-    activeEdit = null;
-  }
-  
-  // Reset split mode
-  splitMode = false;
-  selectedForSplit = null;
-  
-  // Reset merge mode
-  selectedForMerge = [];
-  
-  // Clear all event handlers
-  map.off('click');
-  
-  // Reset all layer styles
-  editableGroup.eachLayer(layer => {
-    if (layer.setStyle) {
-      layer.setStyle({ 
-        color: layer.defaultColor || STYLES.parcel.color, 
-        weight: 1.4,
-        fillOpacity: 0
-      });
-    }
-  });
-  
-  // Close all popups
-  map.closePopup();
-  
+  resetAllModes();
   console.log("🔄 All modes reset");
-  alert("ยกเลิกทุกโหมด\nพร้อมใช้งานใหม่");
+  // 🔧 FIX (ค้าง/ไม่คืนค่า): เหตุผลเดียวกับปุ่ม "หยุด" — เอา alert() ที่บล็อกหน้าจอออก
 };
 
 console.log("✅ Draw module loaded");
