@@ -106,13 +106,13 @@ function setupKeyboardShortcuts() {
     }
     
     // Escape - Clear search and stop edit
+    // 🔧 FIX (เลือกฟังก์ชันต่างๆ ยาก): เดิม Escape ล้างแค่ activeEdit กับ edit-handler
+    // ไม่ได้ล้างโหมดแบ่งแปลง/รวมแปลง (splitMode, selectedForSplit, selectedForMerge,
+    // map click handler ค้างจาก setMapClickHandler) ทำให้ยังมีช่องโหว่เดียวกับปุ่มต่างๆ
+    // เดิม (ดู resetAllModes() ใน draw.js) เปลี่ยนมาเรียก resetAllModes() แทน
     if (e.key === 'Escape') {
-      if (activeEdit) {
-        activeEdit.disable();
-        activeEdit = null;
-      }
+      if (typeof resetAllModes === 'function') resetAllModes();
       clearHighlight();
-      map.closePopup();
     }
   });
 }
@@ -183,6 +183,9 @@ document.getElementById('btnManageLayers')?.addEventListener('click', function()
   allLayersVisible = !allLayersVisible;
   
   // รายชื่อ layer ทั้งหมดที่ต้องการควบคุม
+  // 🔧 FIX: ชื่อตัวแปร global จริงใน layers.js ของแปลงชุมชน/แปลงเกษตรคือภาษาไทย
+  // (แปลงชุมชนLayer / แปลงเกษตรLayer) ไม่ใช่ communityLayer/agricultureLayer เดิม
+  // ทำให้ window[...] เป็น undefined เสมอ ปุ่มนี้เลย toggle 2 เลเยอร์นี้ไม่ได้เงียบๆ
   const layerNames = [
     'dlaParcel',        // เส้นแดงกรมที่ดิน
     'dlaTambon',        // ขอบเขตตำบล
@@ -192,8 +195,8 @@ document.getElementById('btnManageLayers')?.addEventListener('click', function()
     'boundaryLayer',    // Boundary
     'buildingLayer',    // Building
     'spkLayer',         // SPK
-    'communityLayer',   // แปลงชุมชน
-    'agricultureLayer', // แปลงเกษตร
+    'แปลงชุมชนLayer',   // แปลงชุมชน
+    'แปลงเกษตรLayer',   // แปลงเกษตร
     'boundaryPointLayer' // Boundary Point
   ];
   
