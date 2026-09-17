@@ -356,6 +356,11 @@ function resetAllModes() {
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(true);
   }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(true);
+  }
 }
 
 /**
@@ -471,6 +476,11 @@ map.on(L.Draw.Event.CREATED, (e) => {
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(true);
   }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(true);
+  }
 });
 
 /**
@@ -516,6 +526,11 @@ $("btnDraw").onclick = () => {
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(false);
+  }
   activeEdit = new L.Draw.Polygon(map, drawControl.options.draw.polygon);
   activeEdit.enable();
   console.log("🟢 Draw mode activated");
@@ -530,6 +545,11 @@ $("btnEdit").onclick = () => {
   resetAllModes();
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
+  }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(false);
   }
   parcelDataMode = false;
   map.closePopup();
@@ -707,6 +727,11 @@ $("btnSplit").onclick = () => {
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(false);
+  }
   
   // Now start split mode
   splitMode = true;
@@ -820,6 +845,11 @@ $("btnMerge").onclick = () => {
   resetAllModes();
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
+  }
+  // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+  // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+  if (typeof setEditableLayersInteractive === 'function') {
+    setEditableLayersInteractive(false);
   }
   parcelDataMode = false;
   map.closePopup();
@@ -989,6 +1019,11 @@ function performSplit(polygon, line) {
   } finally {
     if (typeof setReferenceLayersInteractive === 'function') {
       setReferenceLayersInteractive(true);
+    }
+    // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+    // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+    if (typeof setEditableLayersInteractive === 'function') {
+      setEditableLayersInteractive(true);
     }
   }
 }
@@ -1244,6 +1279,11 @@ function performMerge() {
   } finally {
     if (typeof setReferenceLayersInteractive === 'function') {
       setReferenceLayersInteractive(true);
+    }
+    // 🔧 FIX: ปิด/เปิด interactive ของ parcelLayer/editableGroup เองด้วย (คู่กับ reference layers ด้านบน)
+    // กันปัญหาคลิกวางจุด/เลือกแปลงไม่ได้ตอนแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน (ไม่มีช่องว่างให้คลิกทะลุ)
+    if (typeof setEditableLayersInteractive === 'function') {
+      setEditableLayersInteractive(true);
     }
   }
 }
