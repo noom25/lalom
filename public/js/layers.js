@@ -5,6 +5,14 @@ let parcelLayer, blockLayer, zoneLayer, boundaryLayer, buildingLayer, spkLayer;
 let boundaryPointLayer, แปลงชุมชนLayer, แปลงเกษตรLayer;
 let parcelGeoJSON;
 
+// เก็บ layer ที่ถูกไฮไลต์ล่าสุด (ใช้ตัดสินว่าตอนปิด popup ควรรีเซ็ตสีหรือไม่)
+// ประกาศไว้ตรงนี้ตั้งแต่ต้น เพราะ popupclose handler ใน onEachParcel/loadVector/loadPoints
+// อ้างถึงตัวแปรนี้ทันทีที่ผู้ใช้คลิกดูข้อมูลแปลงครั้งแรก — ถ้าไม่ประกาศไว้ก่อน
+// (เดิมรอให้ draw.js สร้างให้ตอนวาดแปลงใหม่เท่านั้น) จะเกิด ReferenceError
+// ทุกครั้งที่ปิด popup ก่อนเคยกดวาดแปลง ทำให้สีไฮไลต์ค้างไม่รีเซ็ต
+window.lastHighlighted = window.lastHighlighted || [];
+let lastHighlighted = window.lastHighlighted;
+
 /**
  * Build HTML table for popup content
  */
@@ -307,6 +315,31 @@ function setReferenceLayersInteractive(interactive) {
       });
     }
   });
+}
+
+/**
+ * 🔧 FIX (วาดเส้นตัด/วาดแปลงใหม่ไม่ติด เฉพาะแปลงที่ถูกล้อมรอบทั้ง 4 ด้าน):
+ * setReferenceLayersInteractive() ปิด click เฉพาะ layer "อ้างอิง" (Zone/Block/ฯลฯ)
+ * แต่ไม่เคยปิด parcelLayer/editableGroup เอง — ตอนวาดเส้นตัด (L.Draw.Polyline หลัง
+ * เลือกแปลงในโหมดแบ่ง) หรือวาดแปลงใหม่ (L.Draw.Polygon) ผู้ใช้ต้องคลิกวางจุดบนแผนที่
+ * ซ้ำๆ ถ้าแปลงมีช่องว่างรอบข้าง คลิกที่ว่างได้ปกติ แต่ถ้าแปลงถูกล้อมรอบสนิททั้ง 4 ด้าน
+ * ทุกจุดที่คลิกจะตกอยู่บนแปลงใดแปลงหนึ่งเสมอ (ซึ่งยังมี popup ผูกอยู่และ interactive)
+ * ทำให้ click ถูกแปลงนั้น "ชิง" ไปเปิด popup/ไฮไลท์ตัวเอง แทนที่จะไปถึง L.Draw
+ * ที่รอวางจุด — ฟังก์ชันนี้ปิด interactive ของ parcelLayer/editableGroup เองชั่วคราว
+ * ระหว่างขั้นตอนวางจุด (เปิดกลับทันทีที่จบ ไม่ว่าสำเร็จหรือ error) เพื่อให้ click
+ * ทะลุไปถึง L.Draw ได้เสมอ ไม่ว่าแปลงจะมีช่องว่างรอบข้างหรือติดกันทั้ง 4 ด้าน
+ */
+function setEditableLayersInteractive(interactive) {
+  if (editableGroup && typeof editableGroup.eachLayer === 'function') {
+    editableGroup.eachLayer(l => {
+      if (l && l.options) l.options.interactive = interactive;
+    });
+  }
+  if (parcelLayer && typeof parcelLayer.eachLayer === 'function') {
+    parcelLayer.eachLayer(l => {
+      if (l && l.options) l.options.interactive = interactive;
+    });
+  }
 }
 
 /**

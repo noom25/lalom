@@ -2,9 +2,6 @@
 /**
  * คำนวณพื้นที่เป็นหน่วยไทย (ไร่-งาน-วา) จากพื้นที่ตารางเมตร
  * แสดงผลสวยงาม ไม่มี .00 เกะกะ ถ้าไม่มีเศษวาจะไม่แสดงหน่วยนั้น
- * 
- * @param {number} areaSqM - พื้นที่เป็นตารางเมตร
- * @returns {string} เช่น "5 ไร่ 2 งาน 35.5 วา" หรือ "0 ไร่ 1 งาน 20 วา"
  */
 function calculateThaiArea(areaSqM) {
   if (!areaSqM || areaSqM <= 0) return "0 ไร่ 0 งาน 0 วา";
@@ -17,20 +14,17 @@ function calculateThaiArea(areaSqM) {
 
   const wa = remainingAfterNgan / 4;
 
-  // จัดรูปแบบวาให้สวย
   const waFormatted = wa % 1 === 0 
     ? wa.toFixed(0) 
     : wa.toFixed(2).replace(/\.?0+$/, '');
 
-  // สร้างข้อความผลลัพธ์
   const parts = [];
   if (rai > 0) parts.push(`${rai} ไร่`);
   if (ngan > 0) parts.push(`${ngan} งาน`);
   if (wa > 0) parts.push(`${waFormatted} วา`);
 
-  // กรณีพิเศษ: ถ้าไม่มีไร่ แต่มีงานหรือวา → แสดงงาน/วาให้ครบ
   if (parts.length === 0) return "0 ไร่ 0 งาน 0 วา";
-  if (rai === 0 && ngan > 0) parts.unshift("0 ไร่"); // เพิ่ม 0 ไร่ ถ้ามีงาน
+  if (rai === 0 && ngan > 0) parts.unshift("0 ไร่");
   if (rai === 0 && ngan === 0 && wa > 0) parts.unshift("0 ไร่ 0 งาน");
 
   return parts.join(' ');
@@ -64,17 +58,16 @@ map.addControl(drawControl);
 let activeEdit = null;
 let selectedForMerge = [];
 let splitMode = false;
+let selectedForSplit = null;
 
-// 🔧 FIX (ประสิทธิภาพ): เก็บเฉพาะ layer ที่ถูกเปลี่ยนสีไว้จริง (ตอนเลือกแปลงเพื่อ
-// แบ่ง/รวม/แก้ไขข้อมูล) แทนที่จะวน editableGroup ทั้งหมด (เป็นพันแปลง) ทุกครั้งที่กด
-// "หยุด"/"รีเซ็ต" — เดิมวนทุกแปลงทำให้ resetAllModes() ค้างหลายวินาที (เจอ [Violation]
-// 'click' handler took 4335ms ใน console) เพราะ setStyle ของ Leaflet ต้องอัปเดต DOM/Canvas
-// ทีละแปลง ยิ่งข้อมูลเยอะยิ่งช้า
+// เก็บเฉพาะ layer ที่ถูกเปลี่ยนสีไว้จริง
 let styledLayers = new Set();
 
-// 🔧 FIX (เสถียรภาพ): เก็บ reference ของ map click handler ปัจจุบันไว้ตัวเดียว
-// เดิมหลายจุดเรียก map.off('click') แบบไม่ระบุ handler ซึ่งจะลบ click listener
-// ของ "ทุกโมดูล" ที่ผูกกับแผนที่ ไม่ใช่แค่ของโหมดวาด/แบ่ง/รวมเท่านั้น
+// true = คลิกแปลงเพื่อดูข้อมูล (popup) ได้ปกติ
+// false = อยู่ในโหมดแก้ไข/แบ่ง/รวม (ปิดการดูข้อมูล เพื่อไม่ให้ popup/ไฮไลต์แดงไปแย่งกับโหมด)
+let parcelDataMode = true;
+
+// เก็บ reference ของ map click handler ปัจจุบัน
 let activeMapClickHandler = null;
 function setMapClickHandler(handler) {
   if (activeMapClickHandler) {
@@ -86,68 +79,252 @@ function setMapClickHandler(handler) {
   }
 }
 
-// 🔧 FIX (เสถียรภาพ): เก็บ handler ของโหมด "แก้ไขข้อมูล" ไว้ระดับโมดูล เพื่อล้างก่อน
-// ผูกชุดใหม่ทุกครั้ง เดิมถ้ากดปุ่ม "แก้ไขข้อมูล" ซ้ำโดยยังไม่ได้คลิกแปลงไหนเลย จะมี
-// handler ซ้อนกันหลายชุด คลิกแปลงทีเดียวเจอ prompt วนซ้ำ
+// เก็บ handler ของโหมด "แก้ไขข้อมูล" ไว้ระดับโมดูล เพื่อล้างก่อนผูกชุดใหม่
+// รองรับทั้ง handler ที่ผูกกับ layer และ handler ที่ผูกกับ map (mousemove hover)
 let editModeHandlers = [];
 function clearEditModeHandlers() {
-  editModeHandlers.forEach(h => h.layer.off('click', h.handler));
+  editModeHandlers.forEach(h => {
+    if (h.isMap) {
+      map.off(h.event || 'mousemove', h.handler);
+    } else {
+      h.layer.off(h.event || 'click', h.handler);
+    }
+  });
   editModeHandlers = [];
 }
 
-// 🔧 FIX (เลือกแปลงผิดตัว): เดิมเช็คแค่ "กรอบสี่เหลี่ยมล้อมรอบ" (getBounds().contains)
-// ไม่ใช่รูปทรงจริงของแปลง ถ้าแปลงข้างเคียงอยู่ติดกัน/เอียง กรอบจะซ้อนทับกัน คลิกมุมแปลง
-// หนึ่งอาจไปโดนอีกแปลงแทน ฟังก์ชันนี้เช็ครูปทรงจริงด้วย turf ก่อน ถ้าไม่โดนตัวไหนพอดี
-// (เช่น คลิกเฉียดขอบแปลงเล็ก) ค่อย fallback ไปหาแปลงที่ใกล้ที่สุดในระยะที่กำหนด เหมือนเดิม
+// ล้าง reference ทั้งหมดของ layer ก่อนลบทิ้ง เพื่อกัน memory leak
+// (styledLayers, lastHighlighted, และ event handlers ที่ผูกไว้กับ layer)
+function cleanupLayer(layer) {
+  if (!layer || layer.__cleaned) return;
+  layer.__cleaned = true;
+  styledLayers.delete(layer);
+  if (typeof lastHighlighted !== 'undefined' && Array.isArray(lastHighlighted)) {
+    const i = lastHighlighted.indexOf(layer);
+    if (i !== -1) lastHighlighted.splice(i, 1);
+  }
+  if (layer.off) layer.off();
+}
+
+// จำกัดความถี่การประมวลผล hover ด้วย requestAnimationFrame
+// เพื่อลด GC pressure / CPU เมื่อมีแปลงจำนวนมาก
+// (มี fallback ไปใช้ requestAnimationFrame ธรรมดา ถ้า L.DomUtil.* ไม่มี)
+const raf = (typeof L.DomUtil.requestAnimFrame === 'function')
+  ? L.DomUtil.requestAnimFrame
+  : (cb) => window.requestAnimationFrame(cb);
+const caf = (typeof L.DomUtil.cancelAnimFrame === 'function')
+  ? L.DomUtil.cancelAnimFrame
+  : (id) => window.cancelAnimationFrame(id);
+
+function throttleAnimFrame(fn) {
+  let frame = null;
+  const throttled = (e) => {
+    if (frame) return;
+    frame = raf(() => {
+      frame = null;
+      fn(e);
+    });
+  };
+  throttled.cancel = () => {
+    if (frame) {
+      caf(frame);
+      frame = null;
+    }
+  };
+  return throttled;
+}
+
+// คำนวณจุดศูนย์กลางจริงของ polygon ผ่าน turf.centroid
+function getLayerCenter(layer) {
+  try {
+    if (window.turf && layer.toGeoJSON) {
+      const geo = layer.toGeoJSON();
+      if (geo.geometry && (geo.geometry.type === 'Polygon' || geo.geometry.type === 'MultiPolygon')) {
+        const c = turf.centroid(geo).geometry.coordinates;
+        return L.latLng(c[1], c[0]);
+      }
+    }
+  } catch (e) {}
+  return layer.getBounds ? layer.getBounds().getCenter() : null;
+}
+
+// วัดระยะจากจุดคลิกถึงเส้นขอบจริงของ polygon (เป็นพิกเซลบนจอ)
+function distanceToLayerEdgePx(latlng, layer) {
+  try {
+    if (window.turf && layer.toGeoJSON) {
+      const geo = layer.toGeoJSON();
+      if (geo.geometry && (geo.geometry.type === 'Polygon' || geo.geometry.type === 'MultiPolygon')) {
+        const line = turf.polygonToLine(geo);
+        const pt = turf.point([latlng.lng, latlng.lat]);
+        let nearestLatLng = null;
+
+        if (line.type === 'FeatureCollection') {
+          let bestDist = Infinity;
+          line.features.forEach(f => {
+            const np = turf.nearestPointOnLine(f, pt);
+            if (np.properties.dist < bestDist) {
+              bestDist = np.properties.dist;
+              nearestLatLng = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+            }
+          });
+        } else {
+          const np = turf.nearestPointOnLine(line, pt);
+          nearestLatLng = L.latLng(np.geometry.coordinates[1], np.geometry.coordinates[0]);
+        }
+
+        if (nearestLatLng) {
+          const p1 = map.latLngToContainerPoint(latlng);
+          const p2 = map.latLngToContainerPoint(nearestLatLng);
+          return p1.distanceTo(p2);
+        }
+      }
+    }
+  } catch (e) {}
+  const center = getLayerCenter(layer);
+  if (!center) return Infinity;
+  const p1 = map.latLngToContainerPoint(latlng);
+  const p2 = map.latLngToContainerPoint(center);
+  return p1.distanceTo(p2);
+}
+
 function pointInLayer(latlng, layer) {
+  // กรองเร็ว: จุดคลิกไม่อยู่ในกรอบ (bbox) ของแปลง → ไม่ต้องรัน turf เลย
+  if (layer.getBounds && !layer.getBounds().contains(latlng)) return false;
   try {
     if (window.turf && layer.toGeoJSON) {
       const geo = layer.toGeoJSON();
       if (geo.geometry && (geo.geometry.type === 'Polygon' || geo.geometry.type === 'MultiPolygon')) {
         const pt = turf.point([latlng.lng, latlng.lat]);
-        return turf.booleanPointInPolygon(pt, geo);
+        // ignoreBoundary: true → จุดที่อยู่บนขอบ/มุมร่วมไม่นับว่า "อยู่ในแปลง"
+        // ป้องกันกรณีแปลงติดกันแล้วจุดเดียวถูกนับว่าเข้าในหลายแปลง
+        return turf.booleanPointInPolygon(pt, geo, { ignoreBoundary: true });
       }
     }
-  } catch (e) {
-    // คำนวณไม่ได้ (ข้อมูลรูปทรงไม่สมบูรณ์) ให้ fallback ไปเช็คกรอบสี่เหลี่ยมแทน
-  }
+  } catch (e) {}
   return layer.getBounds ? layer.getBounds().contains(latlng) : false;
 }
 
-function findParcelAt(latlng, group, maxNearDist = 90) {
-  // 1) เช็คจุดตกในรูปทรงจริงก่อน (แม่นยำสุด)
+function findParcelAt(latlng, group, maxNearDistPx = 65, showPicker = false) {
+  let __debugCount = 0;
+  group.eachLayer(() => __debugCount++);
+  console.log(`[findParcelAt] group มี ${__debugCount} features, คลิกที่`, latlng);
+
+  // จุดคลิกเป็นพิกเซลบนจอ (ใช้คัดแปลงที่ไกลออกโดยไม่ต้องรัน turf)
+  const cp = map.latLngToContainerPoint(latlng);
+
+  // 1) ผ่านทีเดียว: คัดแปลงที่ bbox ห่างจากจุดเกิน maxNearDistPx px ทิ้งก่อน
+  //    → เหลือเฉพาะแปลงที่ "อยู่ใกล้จริงๆ" เท่านั้นที่เข้า turf
   const exactMatches = [];
+  const nearLayers = [];
+
   group.eachLayer(layer => {
-    if (pointInLayer(latlng, layer)) exactMatches.push(layer);
+    if (!layer.getBounds) return;
+
+    const b = layer.getBounds();
+    const bsw = map.latLngToContainerPoint(b.getSouthWest());
+    const bne = map.latLngToContainerPoint(b.getNorthEast());
+    const minX = Math.min(bsw.x, bne.x) - maxNearDistPx;
+    const maxX = Math.max(bsw.x, bne.x) + maxNearDistPx;
+    const minY = Math.min(bsw.y, bne.y) - maxNearDistPx;
+    const maxY = Math.max(bsw.y, bne.y) + maxNearDistPx;
+    if (cp.x < minX || cp.x > maxX || cp.y < minY || cp.y > maxY) return;
+
+    if (b.contains(latlng)) {
+      if (pointInLayer(latlng, layer)) exactMatches.push(layer);
+    } else {
+      nearLayers.push(layer);
+    }
   });
 
+  console.log(`[findParcelAt] exactMatches: ${exactMatches.length}`,
+    exactMatches.map(l => l.feature?.properties?.parcel_code || '(no code)'));
+
   if (exactMatches.length === 1) return exactMatches[0];
+
+  // 2) จุดอยู่ในหลายแปลงพร้อมกัน (แปลงติดกัน/ทับซ้อน)
+  //    → เลือกแปลงที่จุดอยู่ "ลึกที่สุด" = ระยะ (px) ถึงขอบของตัวเองไกลสุด
+  //    แปลงที่จุดอยู่ลึกสุดคือแปลงที่ผู้ใช้หมายถึงแน่ที่สุด
   if (exactMatches.length > 1) {
-    // เคสซ้อนกันพอดี (หายาก) เลือกตัวที่จุดศูนย์กลางใกล้สุด
-    let best = null, bestDist = Infinity;
+    let best = null, bestDepth = -1;
     exactMatches.forEach(layer => {
-      const d = latlng.distanceTo(layer.getBounds().getCenter());
-      if (d < bestDist) { bestDist = d; best = layer; }
+      const depth = distanceToLayerEdgePx(latlng, layer);
+      if (depth > bestDepth) { bestDepth = depth; best = layer; }
     });
     return best;
   }
 
-  // 2) ไม่โดนตัวไหนพอดี (คลิกเฉียดขอบ) → หาแปลงที่ใกล้สุดในระยะที่กำหนด เหมือนพฤติกรรมเดิม
-  let closestLayer = null, minDist = Infinity;
-  group.eachLayer(layer => {
-    if (!layer.getBounds) return;
-    const dist = latlng.distanceTo(layer.getBounds().getCenter());
-    if (dist < maxNearDist && dist < minDist) {
-      minDist = dist;
-      closestLayer = layer;
-    }
+  // 3) fallback หาแปลงที่ขอบใกล้สุดในระยะไม่เกิน maxNearDistPx พิกเซล
+  const nearCandidates = [];
+  nearLayers.forEach(layer => {
+    const distPx = distanceToLayerEdgePx(latlng, layer);
+    if (distPx < maxNearDistPx) nearCandidates.push({ layer, distPx });
   });
-  return closestLayer;
+
+  if (!nearCandidates.length) {
+    console.log(`[findParcelAt] fallback → ไม่พบเลย (ต้อง < ${maxNearDistPx}px)`);
+    return null;
+  }
+
+  nearCandidates.sort((a, b) => a.distPx - b.distPx);
+
+  // จุดอยู่บนขอบร่วมของหลายแปลงที่ติดกัน (ระยะเกือบเท่ากัน ~0px)
+  // → ใช้จุดศูนย์กลางที่ใกล้สุดเป็นตัวตัดสิน (กันเลือกแบบสุ่ม)
+  const bestDist = nearCandidates[0].distPx;
+
+  // เลือกแปลงที่ขอบใกล้สุด (ถ้าระยะเกือบเท่ากัน → ใช้จุดศูนย์กลางตัดสิน)
+  const pickNearest = (list) => {
+    const bd = list[0].distPx;
+    const ties = list.filter(c => c.distPx <= bd + 1);
+    if (ties.length > 1) {
+      ties.sort((a, b) => {
+        const ca = getLayerCenter(a.layer);
+        const cb = getLayerCenter(b.layer);
+        return (ca ? latlng.distanceTo(ca) : Infinity) - (cb ? latlng.distanceTo(cb) : Infinity);
+      });
+    }
+    return ties[0].layer;
+  };
+
+  // กล่องเลือกเอง: คลิกอยู่ระหว่างหลายแปลง → ให้ผู้ใช้เลือกแปลงที่ต้องการ
+  const pickFromDialog = (list) => {
+    const options = list.slice(0, 5).map((c, i) =>
+      `${i + 1}. ${c.layer.feature?.properties?.parcel_code || '(no code)'} (ระยะ ${c.distPx.toFixed(0)}px)`);
+    const ans = prompt(
+      `คลิกนี้อยู่ระหว่างหลายแปลง\nเลือกแปลงที่ต้องการ:\n\n` +
+      `${options.join('\n')}\n\n` +
+      `(กดหมาย 1-5 หรือ พิมพ์รหัสแปลง)`,
+      "1"
+    );
+    if (ans === null) return null;
+    const trimmed = String(ans).trim();
+    const numIdx = parseInt(trimmed, 10);
+    if (numIdx >= 1 && numIdx <= list.length) return list[numIdx - 1].layer;
+    const byCode = list.find(c => c.layer.feature?.properties?.parcel_code === trimmed);
+    if (byCode) return byCode.layer;
+    return list[0].layer;
+  };
+
+  // จุดอยู่บน/ใกล้ขอบร่วมของหลายแปลงที่ติดกัน (ระยะสองแปลงแรกเกือบเท่ากัน)
+  // → ให้ผู้ใช้เลือกเอง (ความแม่นยำไม่ลด)
+  const ambiguous = nearCandidates.length >= 2 && (nearCandidates[1].distPx - bestDist) <= 15;
+
+  if (ambiguous && showPicker) {
+    const picked = pickFromDialog(nearCandidates.filter(c => c.distPx <= bestDist + 30));
+    if (!picked) return null;
+    console.log(`[findParcelAt] fallback → เลือกเอง: ${picked.feature?.properties?.parcel_code || '(no code)'} ระยะ ${bestDist.toFixed(1)}px`);
+    return picked;
+  }
+
+  let result = pickNearest(nearCandidates);
+
+  console.log(`[findParcelAt] fallback → พบ:`,
+    result.feature?.properties?.parcel_code || '(no code)',
+    `ระยะ ${bestDist.toFixed(1)}px (ต้อง < ${maxNearDistPx}px)`);
+
+  return result;
 }
 
-// 🔧 FIX (เสถียรภาพ): จุดรีเซ็ตกลางจุดเดียว เดิมปุ่มเปิดโหมดแต่ละปุ่ม (วาด/แก้ไขข้อมูล/
-// แบ่ง/รวม) reset แค่ตัวแปรของโหมดตัวเอง ทำให้สลับปุ่มระหว่างทำงานโดยไม่กด "หยุด" ก่อน
-// มี handler ของโหมดเก่าค้างซ้อนได้ ตอนนี้ทุกปุ่มเรียกจุดนี้ก่อนเริ่มโหมดใหม่เสมอ
+// จุดรีเซ็ตกลางจุดเดียว
 function resetAllModes() {
   if (activeEdit) {
     if (typeof activeEdit.disable === 'function') activeEdit.disable();
@@ -160,8 +337,6 @@ function resetAllModes() {
 
   setMapClickHandler(null);
 
-  // 🔧 FIX (ประสิทธิภาพ): รีเซ็ตสีเฉพาะแปลงที่เคยถูกไฮไลท์จริง (เร็วขึ้นมาก โดยเฉพาะ
-  // ข้อมูลที่มีเป็นพันแปลง) แทนการวนทุกแปลงใน editableGroup
   styledLayers.forEach(layer => {
     if (layer.setStyle) {
       layer.setStyle({
@@ -176,8 +351,8 @@ function resetAllModes() {
   selectedForMerge = [];
   map.closePopup();
 
-  // 🔧 FIX: คืนค่าให้ layer อ้างอิง (Zone/Block/Boundary/ฯลฯ) กิน click ได้ตามปกติ
-  // เมื่อไม่มีโหมดวาด/แก้ไข/แบ่ง/รวมทำงานอยู่แล้ว (ดู setReferenceLayersInteractive ใน layers.js)
+  parcelDataMode = true;
+
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(true);
   }
@@ -187,20 +362,18 @@ function resetAllModes() {
  * Handle feature creation
  */
 map.on(L.Draw.Event.CREATED, (e) => {
-  // Handle split mode
   if (splitMode && selectedForSplit && e.layerType === 'polyline') {
     const line = e.layer;
     performSplit(selectedForSplit, line);
     splitMode = false;
     selectedForSplit = null;
-    activeEdit = null; // 🔧 FIX: วาดเส้นตัดเสร็จแล้ว เคลียร์ reference ที่เก็บไว้ให้ resetAllModes()
+    activeEdit = null;
     return;
   }
   
   const layer = e.layer;
-  activeEdit = null; // 🔧 FIX: วาดแปลงเสร็จแล้ว (Leaflet.Draw ปิดโหมดของตัวเองอัตโนมัติ) เคลียร์ reference ด้วย
+  activeEdit = null;
   
-  // Initialize feature properties
   layer.feature = layer.feature || { 
     type: "Feature", 
     properties: {
@@ -213,13 +386,11 @@ map.on(L.Draw.Event.CREATED, (e) => {
     }
   };
   
-  // Calculate area if polygon
   if (layer instanceof L.Polygon) {
-  const area = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
-  layer.feature.properties.area = calculateThaiArea(area);
-}
+    const area = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+    layer.feature.properties.area = calculateThaiArea(area);
+  }
   
-  // Prompt for properties
   const zone = prompt("โซน (zone):", "");
   const block = prompt("บลอค (block):", "");
   const lot = prompt("ล็อต (lot):", "");
@@ -232,7 +403,6 @@ map.on(L.Draw.Event.CREATED, (e) => {
   const landType = prompt("land_type:", "สปก 4-01");
   const scale = prompt("Scale:", "-");
   
-  // Update properties
   layer.feature.properties = {
     parcel_code: parcelCode,
     zone: zone || "",
@@ -247,23 +417,21 @@ map.on(L.Draw.Event.CREATED, (e) => {
     created_at: new Date().toISOString()
   };
   
-  // Add to layers
   editableGroup.addLayer(layer);
   if (parcelLayer) {
     parcelLayer.addLayer(layer);
   }
   
-  // Bind popup
   layer.bindPopup(buildPropsTable(layer.feature.properties));
   layer.openPopup();
   layer.defaultColor = STYLES.parcel.color;
   
-  // Add click highlight for new feature
   layer.on('click', function(e) {
-    if (activeEdit) return;
-    
-    // Clear other highlights
-    parcelLayer.eachLayer(l => {
+    if (activeEdit || !parcelDataMode) return;
+
+    // คืนค่าสีเฉพาะแปลงที่ไฮไลต์ไว้ก่อนหน้า (แทนการวนทุกแปลงใน parcelLayer
+    // ซึ่งถ้าแปลงเยอะ เช่น 8827 แปลง จะค้างหนักมาก)
+    lastHighlighted.forEach(l => {
       if (l !== layer && l.setStyle) {
         l.setStyle({
           color: l.defaultColor || STYLES.parcel.color,
@@ -272,8 +440,10 @@ map.on(L.Draw.Event.CREATED, (e) => {
         });
       }
     });
-    
-    // Highlight clicked feature
+    const li = lastHighlighted.indexOf(layer);
+    if (li !== -1) lastHighlighted.splice(li, 1);
+    lastHighlighted.push(layer);
+
     if (layer.setStyle) {
       layer.setStyle({
         color: '#ff6b6b',
@@ -284,7 +454,6 @@ map.on(L.Draw.Event.CREATED, (e) => {
     }
   });
   
-  // Reset on popup close
   layer.on('popupclose', function() {
     setTimeout(() => {
       if (layer.setStyle && !lastHighlighted.includes(layer)) {
@@ -299,8 +468,6 @@ map.on(L.Draw.Event.CREATED, (e) => {
   
   console.log("✅ Created:", layer.feature.properties.parcel_code);
 
-  // 🔧 FIX: วาดแปลงเสร็จแล้ว (leaflet.draw ปิดโหมดวาดของตัวเองอัตโนมัติ) คืนค่าให้
-  // layer อื่นกิน click ได้ตามปกติ
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(true);
   }
@@ -317,13 +484,11 @@ map.on(L.Draw.Event.EDITED, (e) => {
     if (layer.feature && layer.feature.properties) {
       layer.feature.properties.updated_at = new Date().toISOString();
       
-      // Recalculate area if polygon
       if (layer instanceof L.Polygon) {
         const area = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
         layer.feature.properties.area = `${(area / 1600).toFixed(2)} ไร่`;
       }
       
-      // Update popup
       layer.setPopupContent(buildPropsTable(layer.feature.properties));
     }
   });
@@ -336,7 +501,7 @@ map.on(L.Draw.Event.DELETED, (e) => {
   console.log(`🗑️ Deleted ${e.layers.getLayers().length} features`);
   
   e.layers.eachLayer(layer => {
-    // Remove from parcel layer
+    cleanupLayer(layer);
     if (parcelLayer && parcelLayer.hasLayer(layer)) {
       parcelLayer.removeLayer(layer);
     }
@@ -348,13 +513,9 @@ map.on(L.Draw.Event.DELETED, (e) => {
  */
 $("btnDraw").onclick = () => {
   resetAllModes();
-  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
-  // 🔧 FIX (กด "หยุด"/Reset แล้วโหมดวาดยังค้าง): เก็บ instance ไว้ที่ activeEdit
-  // เหมือนกับโหมดอื่นๆ ให้ resetAllModes() สั่ง .disable() ปิดโหมดวาดได้จริง
-  // (เดิมสร้างลอยๆ ไม่ได้เก็บไว้ที่ไหน resetAllModes() เลยหาตัวสั่งปิดไม่เจอ)
   activeEdit = new L.Draw.Polygon(map, drawControl.options.draw.polygon);
   activeEdit.enable();
   console.log("🟢 Draw mode activated");
@@ -362,137 +523,166 @@ $("btnDraw").onclick = () => {
 };
 
 /**
- * Button: Edit feature properties
+ * Button: Edit feature properties (เพิ่มระบบ Hover ไฮไลต์แปลงก่อนคลิก)
  */
 $("btnEdit").onclick = () => {
-  // ล้างโหมดอื่นที่อาจค้างอยู่ก่อน (วาด/แบ่ง/รวม) + handler แก้ไขข้อมูลของรอบก่อน
+  // ล้างโหมดอื่นที่อาจค้างอยู่ก่อน (วาด/แบ่ง/รวม)
   resetAllModes();
-  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
+  parcelDataMode = false;
+  map.closePopup();
 
-  alert("โหมดแก้ไขข้อมูล\nคลิกที่แปลงเพื่อแก้ไขข้อมูล");
-  
-  // Add ONE-TIME click handler to each layer
-  editableGroup.eachLayer(layer => {
-    if (!layer.feature) return;
-    
-    const clickHandler = function(e) {
-      L.DomEvent.stopPropagation(e);
+  alert("โหมดแก้ไขข้อมูล\nเลื่อนเมาส์ชี้แปลงที่ต้องการแก้ไขแล้วคลิก");
+  console.log("✏️ Edit data mode activated");
 
-      // 🔧 FIX (คลิกผิดแปลงแล้วต้องไล่กด Cancel ทีละช่องจนครบ): เดิมถ้าคลิกผิดแปลง
-      // ต้องกด Cancel ใน prompt "zone" ก่อนถึงจะยกเลิกได้ (เพราะ prompt() บล็อกทั้ง
-      // หน้าเว็บ กดปุ่ม "หยุด" ระหว่างนั้นไม่ได้เลย) เพิ่มกล่องยืนยันแปลงไว้ตัวแรกสุด
-      // เพื่อให้กด Cancel เพียงครั้งเดียวก็ออกจากโหมดแก้ไขของแปลงนี้ได้ทันที
-      const props = layer.feature.properties;
-      const confirmEdit = confirm(
-        `แก้ไขข้อมูลแปลง: ${props.parcel_code || "(ไม่มีรหัส)"}\n\n` +
-        `ใช่แปลงที่ต้องการหรือไม่?\n` +
-        `(กด OK = ใช่ แก้ไขต่อ, Cancel = ไม่ใช่ คลิกแปลงใหม่)`
-      );
-      if (!confirmEdit) {
-        layer.setStyle({
-          color: layer.defaultColor || STYLES.parcel.color,
-          weight: 1.4
-        });
-        // ผูก handler ของแปลงนี้กลับคืน เผื่อผู้ใช้ต้องการคลิกแปลงนี้ใหม่อีกครั้ง
-        editModeHandlers.push({ layer: layer, handler: clickHandler });
-        layer.once('click', clickHandler);
-        return;
-      }
+  // ============================================================
+  // 👇 ระบบ Hover ไฮไลต์แปลงก่อนคลิก
+  // ============================================================
+  let hoveredLayerForEdit = null;
+  let hoverActive = false;
 
-      // Highlight
-      layer.setStyle({ color: 'blue', weight: 3 });
+  const mouseMoveHandler = (e) => {
+    const layer = findParcelAt(e.latlng, editableGroup, 55);
+
+    if (hoveredLayerForEdit && hoveredLayerForEdit !== layer) {
+      hoveredLayerForEdit.setStyle({
+        color: hoveredLayerForEdit.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+      styledLayers.delete(hoveredLayerForEdit);
+    }
+
+    if (layer) {
+      layer.setStyle({
+        color: '#3388ff',
+        weight: 2,
+        fillOpacity: 0.15,
+        fillColor: '#3388ff'
+      });
       styledLayers.add(layer);
+      hoveredLayerForEdit = layer;
+    } else {
+      hoveredLayerForEdit = null;
+    }
+  };
 
-      // Prompt for each field
-      const zone = prompt("zone:", props.zone || "");
-      if (zone === null) {
-        layer.setStyle({ 
-          color: layer.defaultColor || STYLES.parcel.color, 
-          weight: 1.4 
-        });
-        clearEditModeHandlers();
-        return;
-      }
-      
-      const block = prompt("block:", props.block || "");
-      if (block === null) {
-        layer.setStyle({ 
-          color: layer.defaultColor || STYLES.parcel.color, 
-          weight: 1.4 
-        });
-        clearEditModeHandlers();
-        return;
-      }
-      
-      const lot = prompt("lot:", props.lot || "");
-      if (lot === null) {
-        layer.setStyle({ 
-          color: layer.defaultColor || STYLES.parcel.color, 
-          weight: 1.4 
-        });
-        clearEditModeHandlers();
-        return;
-      }
-      
-      const parcelCode = prompt("parcel_code:", props.parcel_code || "");
-      if (parcelCode === null) {
-        layer.setStyle({ 
-          color: layer.defaultColor || STYLES.parcel.color, 
-          weight: 1.4 
-        });
-        clearEditModeHandlers();
-        return;
-      }
-      
-      const survey = prompt("survey:", props.survey || "-");
-      const landNo = prompt("land_no:", props.land_no || "-");
-      const mapsheet = prompt("Mapsheet:", props.Mapsheet || "-");
-      const landType = prompt("land_type:", props.land_type || "-");
-      const scale = prompt("Scale:", props.Scale || "-");
-      
-      // Update properties
-      // Note: We don't update these fields:
-      // - area (ไร่ งาน วา) = keep original calculated value
-      // - created_at = keep original creation time
-      // - updated_at = not needed, makes data messy
-      layer.feature.properties.zone = zone;
-      layer.feature.properties.block = block;
-      layer.feature.properties.lot = lot;
-      layer.feature.properties.parcel_code = parcelCode;
-      layer.feature.properties.survey = survey;
-      layer.feature.properties.land_no = landNo;
-      layer.feature.properties.Mapsheet = mapsheet;
-      layer.feature.properties.land_type = landType;
-      layer.feature.properties.Scale = scale;
-      
-      // Update popup
-      layer.setPopupContent(buildPropsTable(layer.feature.properties));
-      layer.openPopup();
-      
-      // Reset style
-      setTimeout(() => {
-        layer.setStyle({ 
-          color: layer.defaultColor || STYLES.parcel.color, 
-          weight: 1.4 
-        });
-      }, 500);
-      
-      alert("✅ แก้ไขข้อมูลแล้ว\nอย่าลืมกด 💾 บันทึก");
-      console.log("✅ Properties updated:", parcelCode);
-      
-      // Remove all handlers after edit
-      clearEditModeHandlers();
+  const throttledHover = throttleAnimFrame(mouseMoveHandler);
+
+  const enableHover = () => {
+    if (!hoverActive) {
+      map.on('mousemove', throttledHover);
+      hoverActive = true;
+    }
+  };
+  const disableHover = () => {
+    if (hoverActive) {
+      map.off('mousemove', throttledHover);
+      throttledHover.cancel();
+      hoverActive = false;
+    }
+  };
+
+  enableHover();
+  // 🔧 เก็บ mousemove handler ไว้ใน editModeHandlers เพื่อให้ resetAllModes() เคลียร์ได้จริง
+  editModeHandlers.push({ isMap: true, event: 'mousemove', handler: throttledHover });
+  // ============================================================
+
+  // 🔧 FIX (กดติดยากเมื่อแปลงติดกันทั้ง 4 ด้าน): ใช้ setMapClickHandler + findParcelAt()
+  const editClickHandler = (e) => {
+    console.log("✏️ [EDIT] click fired at", e.latlng);
+    const layer = findParcelAt(e.latlng, editableGroup, 65, true);
+    console.log("✏️ [EDIT] findParcelAt →", layer ? (layer.feature?.properties?.parcel_code || '(no code)') : 'NULL');
+
+    if (!layer || !layer.feature) {
+      console.log("⚠️ No parcel found. Click closer to parcel.");
+      alert("ไม่พบแปลง\nคลิกใกล้ๆ แปลงมากขึ้น");
+      return;
+    }
+
+    // ปิด popup ดูข้อมูลทิ้ง เพื่อไม่ให้ทับแปลง/แย่งโหมดแก้ไข
+    map.closePopup();
+
+    // 🔧 ปิด hover ระหว่างกรอกข้อมูล
+    disableHover();
+    if (hoveredLayerForEdit) {
+      hoveredLayerForEdit.setStyle({
+        color: hoveredLayerForEdit.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+      styledLayers.delete(hoveredLayerForEdit);
+      hoveredLayerForEdit = null;
+    }
+
+    const resetLayerStyle = () => {
+      layer.setStyle({
+        color: layer.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+      styledLayers.delete(layer);
+      // 🔧 เปิด hover กลับมา เพื่อให้แก้ไขแปลงถัดไปได้ทันที
+      enableHover();
     };
-    
-    // Store handler reference
-    editModeHandlers.push({ layer: layer, handler: clickHandler });
-    layer.once('click', clickHandler); // Use 'once' for one-time only
-  });
-  
-  console.log("✏️ Edit data mode activated (one-time)");
+
+    const props = layer.feature.properties;
+const confirmEdit = confirm(
+      `แก้ไขข้อมูลแปลง: ${props.parcel_code || "(ไม่มีรหัส)"}\n\n` +
+      `ใช่แปลงที่ต้องการหรือไม่?\n` +
+      `(กด OK = ใช่ แ้ไขต่อ, Cancel = ไม่ใช่ คลิกแปลงใหม่)`
+    );
+    console.log("✏️ [EDIT] confirm →", confirmEdit);
+    if (!confirmEdit) {
+      resetLayerStyle();
+      return;
+    }
+
+    // Highlight
+    layer.setStyle({ color: 'blue', weight: 3, fillOpacity: 0.2 });
+    styledLayers.add(layer);
+
+    // Prompt for each field
+    const zone = prompt("zone:", props.zone || "");
+    if (zone === null) { resetLayerStyle(); return; }
+
+    const block = prompt("block:", props.block || "");
+    if (block === null) { resetLayerStyle(); return; }
+
+    const lot = prompt("lot:", props.lot || "");
+    if (lot === null) { resetLayerStyle(); return; }
+
+    const parcelCode = prompt("parcel_code:", props.parcel_code || "");
+    if (parcelCode === null) { resetLayerStyle(); return; }
+
+    const survey = prompt("survey:", props.survey || "-");
+    const landNo = prompt("land_no:", props.land_no || "-");
+    const mapsheet = prompt("Mapsheet:", props.Mapsheet || "-");
+    const landType = prompt("land_type:", props.land_type || "-");
+    const scale = prompt("Scale:", props.Scale || "-");
+
+    layer.feature.properties.zone = zone;
+    layer.feature.properties.block = block;
+    layer.feature.properties.lot = lot;
+    layer.feature.properties.parcel_code = parcelCode;
+    layer.feature.properties.survey = survey;
+    layer.feature.properties.land_no = landNo;
+    layer.feature.properties.Mapsheet = mapsheet;
+    layer.feature.properties.land_type = landType;
+    layer.feature.properties.Scale = scale;
+
+    layer.setPopupContent(buildPropsTable(layer.feature.properties));
+    layer.openPopup();
+
+    setTimeout(resetLayerStyle, 500);
+
+    alert("✅ แก้ไขข้อมูลแล้ว\nอย่าลืมกด 💾 บันทึก");
+    console.log("✅ Properties updated:", parcelCode);
+  };
+
+  setMapClickHandler(editClickHandler);
 };
 
 /**
@@ -501,18 +691,10 @@ $("btnEdit").onclick = () => {
 $("btnStop").onclick = () => {
   resetAllModes();
   console.log("⛔ All modes stopped");
-  // 🔧 FIX (ค้าง/ไม่คืนค่า): เอา alert() ออกจากปุ่มนี้ เพราะ alert() เป็นคำสั่ง
-  // "บล็อก" การทำงานทั้งหมดจนกว่าจะกด OK — เวลาที่เห็นใน console ว่า handler ใช้เวลา
-  // เป็นวินาที ส่วนใหญ่คือเวลาที่รอผู้ใช้กด OK ไม่ใช่โค้ดทำงานช้า และทำให้รู้สึกเหมือน
-  // ปุ่ม "หยุด" ไม่ตอบสนอง ทั้งที่จริงๆ รีเซ็ตเสร็จตั้งแต่ก่อนเรียก alert() แล้ว
-  // ปุ่มนี้ควรเร็วและไม่ต้องกดอะไรเพิ่ม เพราะมีไว้ให้กู้สถานะตอนติดขัด
 };
 
-// Selected parcel for split
-let selectedForSplit = null;
-
 /**
- * Button: Split parcel
+ * Button: Split parcel (เพิ่มระบบ Hover ไฮไลต์แปลงก่อนคลิก)
  */
 $("btnSplit").onclick = () => {
   if (!window.turf) {
@@ -522,37 +704,91 @@ $("btnSplit").onclick = () => {
   
   // Force reset everything first (โหมดอื่นด้วย ไม่ใช่แค่ split)
   resetAllModes();
-  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
   
   // Now start split mode
   splitMode = true;
+  parcelDataMode = false;
+  map.closePopup();
   
-  alert("โหมดแบ่งแปลง\nคลิกเลือกแปลงที่ต้องการแบ่ง");
+  alert("โหมดแบ่งแปลง\nเลื่อนเมาส์ชี้แปลงที่ต้องการแล้วคลิกเลือก");
   console.log("✂️ Split mode: waiting for parcel selection");
   
+  // ============================================================
+  // 👇 ระบบ Hover ไฮไลต์แปลงก่อนคลิก
+  // ============================================================
+  let hoveredLayerForSplit = null;
+  
+  const mouseMoveHandler = (e) => {
+    const closestLayer = findParcelAt(e.latlng, editableGroup, 55);
+    
+    // คืนค่าสีแปลงเก่าที่เคยถูกชี้ (ถ้าไม่ใช่ตัวเดิม และไม่ใช่ตัวที่เลือกไว้แล้ว)
+    if (hoveredLayerForSplit && hoveredLayerForSplit !== closestLayer && hoveredLayerForSplit !== selectedForSplit) {
+      hoveredLayerForSplit.setStyle({
+        color: hoveredLayerForSplit.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+      styledLayers.delete(hoveredLayerForSplit);
+    }
+    
+    // ไฮไลต์แปลงที่เมาส์กำลังชี้อยู่ (สีฟ้าอ่อน)
+    if (closestLayer && closestLayer !== selectedForSplit) {
+      closestLayer.setStyle({
+        color: '#3388ff',
+        weight: 2,
+        fillOpacity: 0.15,
+        fillColor: '#3388ff'
+      });
+      styledLayers.add(closestLayer);
+      hoveredLayerForSplit = closestLayer;
+    } else if (!closestLayer) {
+      hoveredLayerForSplit = null;
+    }
+  };
+  
+  const throttledHover = throttleAnimFrame(mouseMoveHandler);
+
+  map.on('mousemove', throttledHover);
+  // 🔧 เก็บ mousemove handler ไว้ใน editModeHandlers เพื่อให้ resetAllModes() เคลียร์ได้จริง
+  editModeHandlers.push({ isMap: true, event: 'mousemove', handler: throttledHover });
+  // ============================================================
+  
   // Click to select parcel
-  // 🔧 FIX: เดิมเช็คแค่กรอบสี่เหลี่ยมล้อมรอบ เปลี่ยนมาใช้ findParcelAt() ที่เช็ครูปทรงจริงก่อน
-  // (กันเลือกผิดแปลงตอนแปลงข้างเคียงอยู่ชิดกัน) แล้วค่อย fallback ระยะใกล้สุดเหมือนเดิม
   const clickHandler = (e) => {
-    const closestLayer = findParcelAt(e.latlng, editableGroup);
+    console.log("✂️ [SPLIT] click fired at", e.latlng);
+    const closestLayer = findParcelAt(e.latlng, editableGroup, 65, true);
+    console.log("✂️ [SPLIT] findParcelAt →", closestLayer ? (closestLayer.feature?.properties?.parcel_code || '(no code)') : 'NULL');
     
     if (closestLayer) {
+      // 🔧 ปิด mousemove เมื่อเลือกแปลงได้แล้ว (กัน hover ค้าง)
+      map.off('mousemove', throttledHover);
+      throttledHover.cancel();
+      
+      // คืนค่าสีของ hoveredLayerForSplit ก่อนเปลี่ยนเป็นสีส้ม (ถ้าเป็นตัวเดียวกันจะได้ไม่ทับ)
+      if (hoveredLayerForSplit && hoveredLayerForSplit !== closestLayer) {
+        hoveredLayerForSplit.setStyle({
+          color: hoveredLayerForSplit.defaultColor || STYLES.parcel.color,
+          weight: 1.4,
+          fillOpacity: 0
+        });
+        styledLayers.delete(hoveredLayerForSplit);
+      }
+      hoveredLayerForSplit = null;
+      
       selectedForSplit = closestLayer;
-      closestLayer.setStyle({ color: 'orange', weight: 3 });
+      closestLayer.setStyle({ color: 'orange', weight: 3, fillOpacity: 0.2 });
       styledLayers.add(closestLayer);
+      // ปิด popup ดูข้อมูลที่อาจเปิดค้างอยู่ทับแปลง ก่อนเริ่มวาดเส้น
+      // (ไม่งั้นคลิกแรกของการวาดเส้นจะไปโดน popup แทนแผนที่)
+      map.closePopup();
       
       console.log("✅ Parcel selected, draw line to split");
       alert("เลือกแปลงแล้ว ✓\nวาดเส้นตัดผ่านแปลง");
       
       // Enable line drawing
-      // 🔧 FIX (กด "หยุด"/Reset แล้วโหมดวาดเส้นยังค้าง): เดิมสร้าง L.Draw.Polyline
-      // ลอยๆ ไม่ได้เก็บ reference ไว้ที่ activeEdit ทำให้ resetAllModes() หาตัวสั่ง
-      // .disable() ไม่เจอ (activeEdit เป็น null อยู่ตลอด) โหมดวาดเส้นเลยยังทำงาน
-      // อยู่เบื้องหลังแม้สีแปลงจะรีเซ็ตกลับปกติแล้วก็ตาม ตอนนี้เก็บ instance ไว้ที่
-      // activeEdit ให้ resetAllModes() สั่งปิดได้จริง
       activeEdit = new L.Draw.Polyline(map, {
         shapeOptions: {
           color: 'red',
@@ -572,7 +808,6 @@ $("btnSplit").onclick = () => {
   setMapClickHandler(clickHandler);
 };
 
-
 /**
  * Button: Merge parcels
  */
@@ -582,25 +817,71 @@ $("btnMerge").onclick = () => {
     return;
   }
   
-  // Reset (โหมดอื่นด้วย ไม่ใช่แค่ merge)
   resetAllModes();
-  // 🔧 FIX: ปิดการกิน click ของ layer อื่น (เพื่อดูเทียบ) โดยไม่ต้องติ๊กปิดออกจากแผนที่
   if (typeof setReferenceLayersInteractive === 'function') {
     setReferenceLayersInteractive(false);
   }
+  parcelDataMode = false;
+  map.closePopup();
   
   alert("โหมดรวมแปลง\nคลิกเลือกแปลง 2 แปลงขึ้นไป\nแล้วกดปุ่ม 'รวมแปลง' อีกครั้ง");
   console.log("🔗 Merge mode: select parcels");
-  
-  // Click to select
-  // 🔧 FIX: เดิมเช็คแค่กรอบสี่เหลี่ยมล้อมรอบ และเลือก "ตัวแรกที่เจอ" ตามลำดับ loop เท่านั้น
-  // (ไม่ได้เทียบระยะเลย) ทำให้แปลงติดกันเลือกผิดตัวได้ง่าย เปลี่ยนมาใช้ findParcelAt()
+
+  // ============================================================
+  // 👇 ระบบ Hover ไฮไลต์แปลงก่อนคลิก
+  // ============================================================
+  let hoveredLayerForMerge = null;
+
+  const mouseMoveHandler = (e) => {
+    const closestLayer = findParcelAt(e.latlng, editableGroup, 55);
+
+    // คืนค่าสีแปลงเก่าที่เคยถูกชี้ (ถ้าไม่ใช่ตัวเดิม และไม่ใช่แปลงที่เลือกไว้แล้ว
+    // เพื่อไม่ให้ hover ไปทับสีน้ำเงินของแปลงที่เลือกค้างไว้)
+    if (hoveredLayerForMerge && hoveredLayerForMerge !== closestLayer && !selectedForMerge.includes(hoveredLayerForMerge)) {
+      hoveredLayerForMerge.setStyle({
+        color: hoveredLayerForMerge.defaultColor || STYLES.parcel.color,
+        weight: 1.4,
+        fillOpacity: 0
+      });
+      styledLayers.delete(hoveredLayerForMerge);
+    }
+
+    // ไฮไลต์แปลงที่เมาส์กำลังชี้อยู่ (สีฟ้าอ่อน) ยกเว้นแปลงที่เลือกไว้แล้ว (สีน้ำเงิน)
+    if (closestLayer && !selectedForMerge.includes(closestLayer)) {
+      closestLayer.setStyle({
+        color: '#3388ff',
+        weight: 2,
+        fillOpacity: 0.15,
+        fillColor: '#3388ff'
+      });
+      styledLayers.add(closestLayer);
+      hoveredLayerForMerge = closestLayer;
+    } else {
+      // ไม่มีแปลงใต้เมาส์ หรือแปลงนั้นถูกเลือกไว้แล้ว (สีน้ำเงิน) → ไม่ต้องไฮไลต์ hover ทับ
+      hoveredLayerForMerge = null;
+    }
+  };
+
+  const throttledHover = throttleAnimFrame(mouseMoveHandler);
+
+  map.on('mousemove', throttledHover);
+  // 🔧 เก็บ mousemove handler ไว้ใน editModeHandlers เพื่อให้ resetAllModes() เคลียร์ได้จริง
+  editModeHandlers.push({ isMap: true, event: 'mousemove', handler: throttledHover });
+  // ============================================================
+
   const mergeClickHandler = (e) => {
-    const layer = findParcelAt(e.latlng, editableGroup);
+    console.log("🔗 [MERGE] click fired at", e.latlng);
+    const layer = findParcelAt(e.latlng, editableGroup, 65, true);
+    console.log("🔗 [MERGE] findParcelAt →", layer ? (layer.feature?.properties?.parcel_code || '(no code)') : 'NULL');
     if (!layer) return;
 
+    // ปิด popup ดูข้อมูลทิ้ง เพื่อไม่ให้ทับแปลง/แย่งโหมดรวม
+    map.closePopup();
+
+    // แปลงที่เพิ่งคลิกไม่ใช่ hover ที่ค้างอยู่แล้ว (กันสถานะ hover เพี้ยน)
+    if (hoveredLayerForMerge === layer) hoveredLayerForMerge = null;
+
     if (selectedForMerge.includes(layer)) {
-      // Deselect
       layer.setStyle({ 
         color: layer.defaultColor || STYLES.parcel.color, 
         weight: 1.4 
@@ -609,17 +890,18 @@ $("btnMerge").onclick = () => {
       selectedForMerge = selectedForMerge.filter(l => l !== layer);
       console.log(`❌ Deselected. Total: ${selectedForMerge.length}`);
     } else {
-      // Select
       layer.setStyle({ color: 'blue', weight: 3 });
       styledLayers.add(layer);
       selectedForMerge.push(layer);
       console.log(`✅ Selected. Total: ${selectedForMerge.length}`);
     }
 
-    // Auto merge if have 2+
     if (selectedForMerge.length >= 2) {
       const confirm = window.confirm(`เลือกแล้ว ${selectedForMerge.length} แปลง\nรวมเลยไหม?`);
       if (confirm) {
+        // 🔧 ปิด mousemove ก่อนเริ่มรวมแปลงจริง (กัน hover ค้าง)
+        map.off('mousemove', throttledHover);
+        throttledHover.cancel();
         setMapClickHandler(null);
         performMerge();
       }
@@ -630,7 +912,7 @@ $("btnMerge").onclick = () => {
 };
 
 /**
- * Perform split operation - อัปเดตให้ใช้ calculateThaiArea()
+ * Perform split operation
  */
 function performSplit(polygon, line) {
   console.log("🔄 Starting split operation...");
@@ -639,11 +921,9 @@ function performSplit(polygon, line) {
     const poly = polygon.toGeoJSON();
     const lineGeo = line.toGeoJSON();
 
-    // Buffer line นิดหน่อยเพื่อตัดให้ขาด
     console.log("📏 Buffering line...");
     const buffered = turf.buffer(lineGeo, 0.0005, { units: 'kilometers' });
 
-    // แบ่งแปลง
     console.log("✂️ Splitting polygon...");
     const split = turf.difference(poly, buffered);
 
@@ -652,11 +932,10 @@ function performSplit(polygon, line) {
       return;
     }
 
-    // ลบแปลงเดิม
+    cleanupLayer(polygon);
     if (editableGroup.hasLayer(polygon)) editableGroup.removeLayer(polygon);
     if (parcelLayer && parcelLayer.hasLayer(polygon)) parcelLayer.removeLayer(polygon);
 
-    // แปลงผลลัพธ์เป็น array ของ coordinates (รองรับทั้ง Polygon และ MultiPolygon)
     const parts = split.geometry.type === 'MultiPolygon'
       ? split.geometry.coordinates
       : [split.geometry.coordinates];
@@ -664,47 +943,38 @@ function performSplit(polygon, line) {
     console.log(`📦 สร้างแปลงใหม่ ${parts.length} แปลง...`);
 
     parts.forEach((coords, i) => {
-      // แปลง coordinates เป็น LatLngs สำหรับ Leaflet
       const latlngs = coords[0].map(coord => L.latLng(coord[1], coord[0]));
 
-      // คำนวณพื้นที่ใหม่ด้วยฟังก์ชันไทย
       const areaSqM = L.GeometryUtil.geodesicArea(latlngs);
       const thaiArea = calculateThaiArea(areaSqM);
 
-      // สร้าง polygon ใหม่
       const newPoly = L.polygon(latlngs, {
         color: STYLES.parcel.color,
         weight: 2,
         fillOpacity: 0.2
       });
 
-      // ตั้ง properties
       newPoly.feature = {
         type: "Feature",
         properties: {
-          ...polygon.feature.properties, // คัดลอกจากแปลงเดิม
+          ...polygon.feature.properties,
           parcel_code: `${polygon.feature.properties.parcel_code}_ส่วน${i + 1}`,
-          area: thaiArea, // ใช้ฟังก์ชันไทย
+          area: thaiArea,
           split_at: new Date().toISOString()
         }
       };
 
-      // เพิ่มลงแผนที่
       editableGroup.addLayer(newPoly);
       if (parcelLayer) parcelLayer.addLayer(newPoly);
 
-      // Bind popup และตั้งค่าเริ่มต้น
       newPoly.bindPopup(buildPropsTable(newPoly.feature.properties));
       newPoly.defaultColor = STYLES.parcel.color;
 
-      // เพิ่ม event คลิกไฮไลต์ (เหมือนแปลงอื่น ๆ)
       newPoly.on('click', function(e) {
         if (activeEdit) return;
-        // ... (คัดลอกโค้ดไฮไลต์จากตอนสร้างใหม่มาใส่ที่นี่ถ้าต้องการ)
       });
     });
 
-    // รีเซ็ตโหมด
     splitMode = false;
     selectedForSplit = null;
 
@@ -717,7 +987,6 @@ function performSplit(polygon, line) {
     splitMode = false;
     selectedForSplit = null;
   } finally {
-    // 🔧 FIX: จบโหมดแบ่งแปลง (สำเร็จหรือ error) คืนค่าให้ layer อื่นกิน click ได้ตามปกติ
     if (typeof setReferenceLayersInteractive === 'function') {
       setReferenceLayersInteractive(true);
     }
@@ -725,8 +994,7 @@ function performSplit(polygon, line) {
 }
 
 /**
- * Perform merge operation - รองรับช่องว่างเล็กน้อยระหว่างแปลง
- * ใช้เทคนิค buffer-merge-unbuffer เพื่อปิดช่องว่าง
+ * Perform merge operation
  */
 function performMerge() {
   if (selectedForMerge.length < 2) {
@@ -737,7 +1005,6 @@ function performMerge() {
   try {
     console.log(`🔗 พยายามรวม ${selectedForMerge.length} แปลง`);
 
-    // Step 1: กรองและ validate layers
     const validLayers = selectedForMerge.filter(layer => {
       if (!layer || typeof layer.toGeoJSON !== 'function') {
         console.warn("Layer ไม่ถูกต้อง:", layer);
@@ -779,7 +1046,6 @@ function performMerge() {
 
     console.log(`✅ พบ ${validLayers.length} แปลงที่ valid`);
 
-    // Step 2: แปลงเป็น Turf Features
     const features = validLayers.map(layer => {
       const geoJSON = layer.toGeoJSON();
       return {
@@ -789,10 +1055,8 @@ function performMerge() {
       };
     });
 
-    // Step 3: 🔥 ใช้ buffer เพื่อปิดช่องว่างระหว่างแปลง
     console.log("🔧 ใช้ buffer เพื่อปิดช่องว่างระหว่างแปลง...");
     
-    // Buffer 1 เมตร เพื่อให้แปลงซ้อนกันนิดหน่อย
     const bufferedFeatures = features.map((feature, idx) => {
       try {
         const buffered = turf.buffer(feature, 0.001, { units: 'kilometers' });
@@ -804,7 +1068,6 @@ function performMerge() {
       }
     });
 
-    // Step 4: รวมแปลงทีละตัว
     console.log("🔗 เริ่มกระบวนการรวม...");
     let merged = bufferedFeatures[0];
 
@@ -833,7 +1096,6 @@ function performMerge() {
       }
     }
 
-    // Step 5: 🎯 ลด buffer กลับเพื่อให้ได้ขนาดเดิม
     console.log("🎯 ลด buffer กลับเพื่อให้ได้ขนาดเดิม...");
     try {
       const unbuffered = turf.buffer(merged, -0.0005, { units: 'kilometers' });
@@ -846,7 +1108,6 @@ function performMerge() {
       console.warn("  ⚠️ ไม่สามารถลด buffer กลับได้:", unbufferErr.message);
     }
 
-    // Step 6: จัดการ MultiPolygon ถ้ายังเหลืออยู่
     if (merged.geometry.type === 'MultiPolygon') {
       console.log("⚠️ ยังเป็น MultiPolygon - พยายาม dissolve...");
       
@@ -866,7 +1127,6 @@ function performMerge() {
       }
     }
 
-    // ถ้ายังเป็น MultiPolygon ให้เลือกส่วนที่ใหญ่ที่สุด
     if (merged.geometry.type === 'MultiPolygon') {
       const polyCount = merged.geometry.coordinates.length;
       const proceed = confirm(
@@ -902,23 +1162,19 @@ function performMerge() {
       };
     }
 
-    // Step 7: แปลงกลับเป็น Leaflet Polygon
     const latlngs = merged.geometry.coordinates[0].map(coord => 
       L.latLng(coord[1], coord[0])
     );
 
-    // Step 8: คำนวณพื้นที่
     const areaSqM = L.GeometryUtil.geodesicArea(latlngs);
     const thaiArea = calculateThaiArea(areaSqM);
 
-    // Step 9: สร้าง layer ใหม่
     const newLayer = L.polygon(latlngs, {
       color: STYLES.parcel.color,
       weight: 2,
       fillOpacity: 0.2
     });
 
-    // รวมข้อมูลจากแปลงแรก
     const baseProps = validLayers[0].feature?.properties || {};
     const mergedParcelCodes = validLayers
       .map(l => l.feature?.properties?.parcel_code || "ไม่ระบุ")
@@ -944,12 +1200,11 @@ function performMerge() {
       geometry: merged.geometry
     };
 
-    // Step 10: เพิ่ม layer ใหม่เข้าแผนที่
     editableGroup.addLayer(newLayer);
     if (parcelLayer) parcelLayer.addLayer(newLayer);
 
-    // Step 11: ลบแปลงเดิมทั้งหมด
     validLayers.forEach(layer => {
+      cleanupLayer(layer);
       if (editableGroup.hasLayer(layer)) editableGroup.removeLayer(layer);
       if (parcelLayer && parcelLayer.hasLayer(layer)) {
         parcelLayer.removeLayer(layer);
@@ -958,12 +1213,10 @@ function performMerge() {
 
     selectedForMerge = [];
     
-    // Bind popup
     newLayer.bindPopup(buildPropsTable(newLayer.feature.properties));
     newLayer.openPopup();
     newLayer.defaultColor = STYLES.parcel.color;
 
-    // แสดงผลสำเร็จ
     const successMsg = 
       `✅ รวม ${validLayers.length} แปลงสำเร็จ!\n\n` +
       `พื้นที่รวม: ${thaiArea}\n` +
@@ -976,9 +1229,6 @@ function performMerge() {
     console.error("❌ Merge ล้มเหลว:", err);
     alert("❌ ไม่สามารถรวมแปลงได้\n\n" + err.message);
 
-    // 🔧 FIX (ประสิทธิภาพ): รีเซ็ตเฉพาะแปลงที่เลือกไว้สำหรับรวมครั้งนี้ (selectedForMerge)
-    // แทนการวนทุกแปลงใน editableGroup (เดิมช้ามากถ้าข้อมูลมีเป็นพันแปลง)
-    // (เดิมยังรีเซ็ต fillOpacity เป็น 0.2 ซึ่งไม่ตรงกับค่าปกติของแปลง (0) ด้วย แก้ให้ตรงกัน)
     selectedForMerge.forEach(layer => {
       if (layer.setStyle && typeof layer.setStyle === 'function') {
         layer.setStyle({
@@ -992,7 +1242,6 @@ function performMerge() {
     
     selectedForMerge = [];
   } finally {
-    // 🔧 FIX: จบโหมดรวมแปลง (สำเร็จหรือ error) คืนค่าให้ layer อื่นกิน click ได้ตามปกติ
     if (typeof setReferenceLayersInteractive === 'function') {
       setReferenceLayersInteractive(true);
     }
@@ -1005,7 +1254,6 @@ function performMerge() {
 $("btnDelete").onclick = () => {
   resetAllModes();
   console.log("🔄 All modes reset");
-  // 🔧 FIX (ค้าง/ไม่คืนค่า): เหตุผลเดียวกับปุ่ม "หยุด" — เอา alert() ที่บล็อกหน้าจอออก
 };
 
 console.log("✅ Draw module loaded");
