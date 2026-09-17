@@ -106,13 +106,13 @@ function setupKeyboardShortcuts() {
     }
     
     // Escape - Clear search and stop edit
-    // 🔧 FIX (เลือกฟังก์ชันต่างๆ ยาก): เดิม Escape ล้างแค่ activeEdit กับ edit-handler
-    // ไม่ได้ล้างโหมดแบ่งแปลง/รวมแปลง (splitMode, selectedForSplit, selectedForMerge,
-    // map click handler ค้างจาก setMapClickHandler) ทำให้ยังมีช่องโหว่เดียวกับปุ่มต่างๆ
-    // เดิม (ดู resetAllModes() ใน draw.js) เปลี่ยนมาเรียก resetAllModes() แทน
     if (e.key === 'Escape') {
-      if (typeof resetAllModes === 'function') resetAllModes();
+      if (activeEdit) {
+        activeEdit.disable();
+        activeEdit = null;
+      }
       clearHighlight();
+      map.closePopup();
     }
   });
 }
@@ -176,62 +176,11 @@ document.getElementById('btnLayerConfig')?.addEventListener('click', function() 
   }
 });
 
-// ========== ปุ่ม Layers: เปิด/ปิดข้อมูลทั้งหมดในแผนที่ ==========
-let allLayersVisible = true; // เริ่มต้นแสดงทั้งหมด
-
-document.getElementById('btnManageLayers')?.addEventListener('click', function() {
-  allLayersVisible = !allLayersVisible;
-  
-  // รายชื่อ layer ทั้งหมดที่ต้องการควบคุม
-  // 🔧 FIX: ชื่อตัวแปร global จริงใน layers.js ของแปลงชุมชน/แปลงเกษตรคือภาษาไทย
-  // (แปลงชุมชนLayer / แปลงเกษตรLayer) ไม่ใช่ communityLayer/agricultureLayer เดิม
-  // ทำให้ window[...] เป็น undefined เสมอ ปุ่มนี้เลย toggle 2 เลเยอร์นี้ไม่ได้เงียบๆ
-  const layerNames = [
-    'dlaParcel',        // เส้นแดงกรมที่ดิน
-    'dlaTambon',        // ขอบเขตตำบล
-    'parcelLayer',      // Parcel
-    'blockLayer',       // Block
-    'zoneLayer',        // Zone
-    'boundaryLayer',    // Boundary
-    'buildingLayer',    // Building
-    'spkLayer',         // SPK
-    'แปลงชุมชนLayer',   // แปลงชุมชน
-    'แปลงเกษตรLayer',   // แปลงเกษตร
-    'boundaryPointLayer' // Boundary Point
-  ];
-  
-  let toggledCount = 0;
-  
-  layerNames.forEach(layerName => {
-    // ใช้ window[layerName] เพื่อเข้าถึงตัวแปร global
-    const layer = window[layerName];
-    
-    if (layer && typeof map !== 'undefined') {
-      if (allLayersVisible) {
-        // เปิด layer
-        if (!map.hasLayer(layer)) {
-          map.addLayer(layer);
-          toggledCount++;
-        }
-      } else {
-        // ปิด layer
-        if (map.hasLayer(layer)) {
-          map.removeLayer(layer);
-          toggledCount++;
-        }
-      }
-    }
-  });
-  
-  if (toggledCount > 0) {
-    console.log(allLayersVisible ? 
-      `✅ เปิดข้อมูลทั้งหมด (${toggledCount} layers)` : 
-      `❌ ปิดข้อมูลทั้งหมด (${toggledCount} layers)`
-    );
-  } else {
-    console.warn('⚠️ ไม่พบ layer ที่ต้องการควบคุม - กรุณารอสักครู่');
-  }
-});
+// 🔧 FIX: เดิมตรงนี้เคยมี event listener ผูกกับปุ่ม #btnManageLayers (toggle เปิด/ปิดทุก layer พร้อมกัน)
+// ซ้ำกับ $("btnManageLayers").onclick ใน storage.js (เปิดเมนูจัดการ Imported Layers)
+// ทำให้กดปุ่ม "Config" ครั้งเดียวเกิด 2 พฤติกรรมพร้อมกัน (prompt เมนู + toggle layer เปิด/ปิด)
+// ตัดสินใจแล้วว่าปุ่มนี้ควรทำหน้าที่เดียวคือจัดการ Imported Layers (ตาม storage.js)
+// จึงลบ handler ตัวนี้ออก ไม่ใช้ปุ่ม #btnManageLayers ควบคุมการเปิด/ปิด layer ทั้งหมดอีกต่อไป
 
 // ===== FIX MAP SIZE (NO TOOLBAR TOGGLE) =====
 function refreshMapSize() {
