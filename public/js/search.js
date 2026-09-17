@@ -1,7 +1,10 @@
 /* ====================== SEARCH & HIGHLIGHT ====================== */
 
 const infoBox = $("searchInfo");
-let lastHighlighted = [];
+// 🔧 FIX: ไม่ประกาศ let lastHighlighted ซ้ำที่นี่ เพราะ layers.js ประกาศไว้แล้วที่ top-level
+// (ถ้าประกาศซ้ำ จะเกิด "Identifier 'lastHighlighted' has already been declared" ตอน parse
+//  ทำให้ทั้งไฟล์ search.js ไม่ถูกรันเลย ปุ่มค้นหา/Enter จึงไม่มีปฏิกิริยาอะไรเลย)
+// ใช้ตัวแปรตัวเดียวกับ layers.js ผ่าน scope ที่แชร์กันข้ามไฟล์ <script> แทน
 let currentMatches = [];
 
 /**
