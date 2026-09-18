@@ -1,311 +1,346 @@
-# คู่มือระบบแผนที่ อบต. บน Cloudflare Workers (ฉบับสมบูรณ์)
+# 🗺️ คู่มือการใช้งานระบบแผนที่ภาษี (LTAX MAP)
+### ระบบ Multi-Tenant รองรับหลาย อบต. — Cloudflare Workers + KV + PWA
 
-เอกสารนี้รวบรวมทุกขั้นตอนตั้งแต่เริ่มต้น อธิบายว่าทำไมต้องทำแต่ละขั้นตอน แก้ปัญหาอะไรมาบ้าง และวิธีดูแลระบบต่อไปในอนาคต เขียนขึ้นจากประสบการณ์จริงตอนตั้งค่าโปรเจกต์ `lalom` (repo: `noom25/lalom`)
+**เวอร์ชัน:** 2.1 (เพิ่ม Template เปล่า + Checklist ป้องกันข้อมูลปนกัน)
+**อัปเดตล่าสุด:** 18 กันยายน 2569
+**สถานะ:** ใช้งานจริง — อบต.ละลม (`lalom`), อบต.ตะเคียนราม (`takhianram`)
 
----
-
-## สารบัญ
-
-1. [ภาพรวมระบบ](#1-ภาพรวมระบบ)
-2. [Cloudflare Pages กับ Workers ต่างกันอย่างไร](#2-cloudflare-pages-กับ-workers-ต่างกันอย่างไร)
-3. [โครงสร้างไฟล์ในโปรเจกต์](#3-โครงสร้างไฟล์ในโปรเจกต์)
-4. [ทำความเข้าใจ wrangler.jsonc](#4-ทำความเข้าใจ-wranglerjsonc)
-5. [ทำความเข้าใจ _worker.js](#5-ทำความเข้าใจ-_workerjs)
-6. [ระบบ Multi-tenant (รองรับหลาย อบต. ด้วย Worker เดียว)](#6-ระบบ-multi-tenant-รองรับหลาย-อบต-ด้วย-worker-เดียว)
-7. [ฝั่ง Frontend ต้องแก้อะไรบ้าง](#7-ฝั่ง-frontend-ต้องแก้อะไรบ้าง)
-8. [ขั้นตอนตั้งค่าตั้งแต่ศูนย์](#8-ขั้นตอนตั้งค่าตั้งแต่ศูนย์)
-9. [วิธีเพิ่ม อบต. ใหม่ในอนาคต](#9-วิธีเพิ่ม-อบต-ใหม่ในอนาคต)
-10. [ปัญหาที่เจอบ่อย และวิธีแก้](#10-ปัญหาที่เจอบ่อย-และวิธีแก้)
-11. [Checklist ทดสอบระบบหลัง Deploy](#11-checklist-ทดสอบระบบหลัง-deploy)
+> ⚠️ **`ltaxmap` (map.ltaxmap.workers.dev) เป็นระบบหลักแยกต่างหาก** ใช้ Netlify Blobs เก็บข้อมูล ไม่เกี่ยวข้องกับระบบ Multi-Tenant ในคู่มือนี้ ห้ามใส่ `"ltaxmap"` ใน `ALLOWED_ABT`
 
 ---
 
-## 1. ภาพรวมระบบ
+## 📋 สารบัญ
 
-ระบบนี้คือ **เว็บแผนที่จัดการแปลงที่ดินสำหรับ อบต.** โดยมีส่วนประกอบหลัก 3 ส่วน:
-
-| ส่วน | หน้าที่ | เทคโนโลยี |
-|---|---|---|
-| **Frontend** | แสดงแผนที่ วาด/แก้ไขแปลงที่ดิน | HTML + Leaflet.js |
-| **Backend (Worker)** | รับ-บันทึก/โหลดข้อมูล GeoJSON | Cloudflare Workers (`_worker.js`) |
-| **ฐานข้อมูล** | เก็บข้อมูลแปลงที่ดินแบบถาวร | Cloudflare KV (key-value storage) |
-
-**จุดออกแบบสำคัญ:** ระบบนี้ถูกออกแบบให้ **Worker ตัวเดียว + KV namespace ตัวเดียว รองรับได้หลาย อบต. พร้อมกัน** โดยแยกข้อมูลแต่ละ อบต. ด้วยการตั้งชื่อ key ใน KV ให้มี "รหัส อบต." นำหน้า วิธีนี้ทำให้ไม่ต้องสร้าง infrastructure (Worker, KV, repo) ใหม่ทุกครั้งที่มี อบต. เพิ่ม
-
----
-
-## 2. Cloudflare Pages กับ Workers ต่างกันอย่างไร
-
-ตอนเริ่มโปรเจกต์นี้ เคยสร้างเป็น **Pages project** มาก่อน แล้วเจอปัญหาซ้ำๆ เพราะ Pages กับ Workers มีกฎการ deploy ต่างกัน
-
-| หัวข้อ | Cloudflare Pages | Cloudflare Workers |
-|---|---|---|
-| จุดประสงค์เดิม | โฮสต์เว็บ static เป็นหลัก | รัน compute/serverless function |
-| โดเมนที่ได้ | `*.pages.dev` | `*.workers.dev` |
-| ไฟล์ backend | ใช้ `_worker.js` แบบ "advanced mode" ซึ่งมีกฎเข้มงวดเรื่องการอัปโหลดไฟล์นี้เป็น asset | รองรับ static assets ผ่าน field `"assets"` ใน `wrangler.jsonc` ได้อย่างยืดหยุ่นกว่า |
-| ปัญหาที่เจอ | error `Uploading a Pages _worker.js file as an asset` ทุกครั้งที่ deploy เพราะ `_worker.js` ถูกวางปนกับโฟลเดอร์ asset | ไม่มีปัญหานี้ ถ้าแยกโฟลเดอร์ asset กับ `_worker.js` ออกจากกันชัดเจน |
-
-**บทเรียนสำคัญ:** ทางออกที่ยั่งยืนที่สุดคือ **แยก `_worker.js` ออกจากโฟลเดอร์ asset ตั้งแต่ต้น** ไม่ว่าจะ deploy เป็น Pages หรือ Workers ก็ตาม โปรเจกต์นี้ตั้งใจใช้เป็น **Workers project** (ได้โดเมนแบบ `*.workers.dev`)
+1. [ภาพรวมระบบ (Architecture Overview)](#1-ภาพรวมระบบ-architecture-overview)
+2. [โครงสร้างไฟล์ทั้งหมดและหน้าที่](#2-โครงสร้างไฟล์ทั้งหมดและหน้าที่)
+3. [ระบบ ABT_CODE รวมศูนย์ (หัวใจสำคัญ)](#3-ระบบ-abt_code-รวมศูนย์-หัวใจสำคัญ)
+4. [วิธีเพิ่ม อบต. ใหม่ (ทำตามนี้ทุกครั้ง)](#4-วิธีเพิ่ม-อบต-ใหม่-ทำตามนี้ทุกครั้ง)
+5. [ขั้นตอนการทดสอบหลัง Deploy](#5-ขั้นตอนการทดสอบหลัง-deploy)
+6. [Checklist ก่อนขึ้นระบบจริงทุกครั้ง](#6-checklist-ก่อนขึ้นระบบจริงทุกครั้ง)
+7. [Troubleshooting — ปัญหาที่เคยเจอจริงและวิธีแก้](#7-troubleshooting--ปัญหาที่เคยเจอจริงและวิธีแก้)
+8. [การจัดการ Cloudflare KV Dashboard](#8-การจัดการ-cloudflare-kv-dashboard)
+9. [เทคนิคใช้งาน AI/OpenCode ให้ประหยัดและไม่ค้าง](#9-เทคนิคใช้งาน-aiopencode-ให้ประหยัดและไม่ค้าง)
+10. [คำถามที่พบบ่อย (FAQ)](#10-คำถามที่พบบ่อย-faq)
 
 ---
 
-## 3. โครงสร้างไฟล์ในโปรเจกต์
+## 1. ภาพรวมระบบ (Architecture Overview)
+
+ระบบใช้โครงสร้าง **Cloudflare Workers + KV Storage (Single KV, Multi-Tenant)** โดยแยกข้อมูลแปลงที่ดินของแต่ละ อบต. ด้วย **Key Prefix** ในชื่อ Key บน KV Namespace ตัวเดียวกัน ไม่ต้องสร้าง Worker หรือ KV แยกทุก อบต.
 
 ```
-lalom/                          ← root ของ repo
-├── _worker.js                  ← โค้ด backend (Worker script)
-├── wrangler.jsonc               ← ไฟล์ config หลักของ Cloudflare
-├── README.md
-└── public/                      ← โฟลเดอร์ asset (static files)
-    ├── index.html                 ← หน้าเว็บหลัก
-    ├── css/                        ← สไตล์
-    ├── js/
-    │   ├── config.js                ← ตั้งค่า URL ข้อมูล/ลิงก์ layer ต่างๆ
-    │   ├── map.js                    ← ตั้งค่าแผนที่ Leaflet เบื้องต้น
-    │   ├── layers.js                  ← โหลด/แสดง layer ต่างๆ บนแผนที่
-    │   ├── draw.js                     ← ฟังก์ชันวาด/แก้ไข/แบ่ง/รวมแปลง
-    │   ├── search.js                    ← ค้นหาแปลงที่ดิน
-    │   ├── storage.js                    ← บันทึก/export ข้อมูล
-    │   └── app.js                         ← เริ่มต้นแอปทั้งหมด
-    └── data/                       ← ไฟล์ GeoJSON ตั้งต้น (ใช้ตอนยังไม่เคยบันทึกอะไร)
+┌─────────────────────────────────────────────────────────┐
+│              Frontend PWA (Static Assets)                 │
+│         {ชื่อ-อบต}.ltaxmap.workers.dev                     │
+│   ─ index.html / home.html                                │
+│   ─ js/config.js  (ABT_CODE ตั้งอยู่ที่นี่จุดเดียว)          │
+│   ─ js/layers.js  (โหลดข้อมูลขึ้นแผนที่)                    │
+│   ─ js/storage.js (บันทึกข้อมูลกลับ)                       │
+└───────────────────────────┬────────────────────────────────┘
+                             │  fetch(API_LOAD_URL / API_SAVE_URL)
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│               Cloudflare Worker (_worker.js)               │
+│           API: POST /api/save?abt={ABT_CODE}               │
+│           API: GET  /api/load?abt={ABT_CODE}                │
+│           ตรวจสอบ abt กับ ALLOWED_ABT ก่อนเสมอ              │
+└───────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│                KV Namespace: test-kv (PARCEL_KV)            │
+│   Key: abt-{ชื่อ-อบต}:parcel.geojson                        │
+│   Key: abt-{ชื่อ-อบต}:backup-YYYY-MM-DD.geojson             │
+│   (แยกข้อมูลแต่ละ อบต. ด้วย prefix "abt-" ในตัวเดียวกัน)     │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**เหตุผลที่ต้องแยก `_worker.js` ออกจาก `public/`:**
-Cloudflare จะสแกนทุกไฟล์ในโฟลเดอร์ที่ตั้งเป็น `assets.directory` แล้วเตรียมอัปโหลดเป็นไฟล์ static ทั้งหมด ถ้า `_worker.js` (ซึ่งเป็นโค้ด backend ที่ควรรันบนเซิร์ฟเวอร์เท่านั้น) ถูกวางอยู่ในโฟลเดอร์เดียวกัน Cloudflare จะไม่แน่ใจว่าคุณต้องการให้มันถูกดาวน์โหลดเป็นไฟล์ static ด้วยหรือเปล่า (ซึ่งจะเปิดเผยโค้ด backend ให้คนภายนอกเห็น) จึงหยุด deploy พร้อม error ไว้ก่อน
+**เหตุผลที่เลือก KV แทน R2:**
+
+- **อ่านเร็วมาก (Low Latency):** KV กระจายข้อมูลไปทั่วโลก โหลดข้อมูลแปลงที่ดินได้ไวทันใจ
+- **ความจุพอเพียง:** เก็บ Value ได้สูงสุด **25 MiB** ต่อ 1 Key — ไฟล์ GeoJSON ระดับตำบล (ไม่กี่พันแปลง) มักมีขนาดแค่ 1–5 MB
+- **ฟรีและประหยัด:** โควต้าอ่านวันละ 100,000 ครั้ง / เขียนวันละ 1,000 ครั้งฟรี ไม่ต้องเสียค่า R2 Storage เพิ่ม
+
+> เมื่อระบบขยายไปเป็นหมื่นแปลง หรือเริ่มเก็บรูปภาพจำนวนมาก ค่อยพิจารณาขยับไปผูก R2 Bucket เพิ่มเติมภายหลัง
 
 ---
 
-## 4. ทำความเข้าใจ wrangler.jsonc
+## 2. โครงสร้างไฟล์ทั้งหมดและหน้าที่
+
+| ไฟล์ | ตำแหน่ง | หน้าที่ |
+|---|---|---|
+| `_worker.js` | root ของ repo | Backend API — รับ/ส่งข้อมูล GeoJSON ผ่าน KV, ตรวจสอบ `ALLOWED_ABT` |
+| `wrangler.jsonc` | root ของ repo | ตั้งค่าชื่อ Worker, ผูก KV Binding, ระบุโฟลเดอร์ static |
+| `public/js/config.js` | public/js/ | **ศูนย์กลางตัวแปร** — `ABT_CODE`, พิกัดแผนที่, สไตล์ Layer |
+| `public/js/map.js` | public/js/ | สร้างแผนที่ Leaflet, Base Layer, WMS กรมที่ดิน |
+| `public/js/layers.js` | public/js/ | โหลดข้อมูลทุก Layer ขึ้นแผนที่ (เรียก `API_LOAD_URL`) |
+| `public/js/storage.js` | public/js/ | บันทึก/Export ข้อมูล (เรียก `API_SAVE_URL`) |
+| `public/js/search.js` | public/js/ | ค้นหาและไฮไลต์แปลงที่ดิน |
+| `public/js/sidebar.js` | public/js/ | แผงแสดงรายละเอียดแปลงที่ดินด้านข้าง |
+| `public/js/draw.js` | public/js/ | เครื่องมือวาด/แก้ไข/แบ่ง/รวมแปลง |
+| `public/js/pt13.js` | public/js/ | ดาวน์โหลดเอกสาร ผ.ท.13 ตามรหัสแปลง |
+| `public/js/app.js` | public/js/ | จุดเริ่มต้นแอป, โหลดทุกโมดูล, Keyboard Shortcuts |
+| `public/index.html` | public/ | หน้าเว็บหลัก — Toolbar แสดงชื่อ อบต. |
+
+---
+
+## 3. ระบบ ABT_CODE รวมศูนย์ (หัวใจสำคัญ)
+
+**ปัญหาที่เคยเจอ:** ตอนย้ายจาก อบต.ละลม ไปตะเคียนราม พบว่าไฟล์ `layers.js` มีการ hardcode `?abt=lalom` ไว้ตรง ๆ แยกจากไฟล์ `storage.js` ที่ hardcode `?abt=takhianram` เอาไว้อีกจุดหนึ่ง ทำให้ **บันทึกข้อมูลไปที่หนึ่ง แต่โหลดข้อมูลกลับมาจากอีกที่หนึ่ง** เกิดความสับสนและเสี่ยงข้อมูลปนกัน
+
+**วิธีแก้ที่ทำไปแล้ว (ตั้งแต่เวอร์ชัน 2.0):** ย้ายค่าคงที่ทั้งหมดไปไว้ที่ `config.js` จุดเดียว แล้วให้ทุกไฟล์เรียกใช้ตัวแปรกลาง ไม่มีการ hardcode ชื่อ อบต. กระจัดกระจายอีกต่อไป
+
+**`public/js/config.js`:**
+
+```javascript
+// ⚠️ จุดเดียวที่ต้องแก้เวลาย้าย/เพิ่ม อบต. ใหม่ ⚠️
+const ABT_CODE = "takhianram";
+
+const API_LOAD_URL = `/api/load?abt=${ABT_CODE}`;
+const API_SAVE_URL = `/api/save?abt=${ABT_CODE}`;
+```
+
+**`public/js/layers.js`** (จุดที่โหลดข้อมูล):
+
+```javascript
+const savedRes = await fetch(API_LOAD_URL, { cache: "no-store" });
+```
+
+**`public/js/storage.js`** (จุดที่บันทึกข้อมูล):
+
+```javascript
+const saveUrl = API_SAVE_URL;
+```
+
+**`_worker.js`** (ฝั่ง Backend — ยังต้องคุมแยกจาก Frontend):
+
+```javascript
+const ALLOWED_ABT = ["lalom", "takhianram"];
+// ⚠️ ห้ามใส่ "ltaxmap" — ระบบนั้นแยกต่างหาก ใช้ Netlify Blobs ไม่ใช่ KV ตัวนี้
+```
+
+> ⚠️ **กฎเหล็ก:** ห้ามพิมพ์ `?abt=ชื่ออบต` ตรง ๆ ในไฟล์อื่นนอกจาก `config.js` อีกเด็ดขาด ถ้าเจอไฟล์ไหนมีการ hardcode ชื่อ อบต. ให้แก้เป็นเรียกใช้ `API_LOAD_URL` / `API_SAVE_URL` แทนทันที ค้นหาทั้งโปรเจกต์ด้วย `Ctrl+Shift+F` หาคำว่า `?abt=` ต้องเจอแค่ 2 บรรทัดใน `config.js` เท่านั้น ถ้าเจอที่อื่นแปลว่ามีจุดหลงเหลืออยู่
+
+---
+
+## 4. วิธีเพิ่ม อบต. ใหม่ (ทำตามนี้ทุกครั้ง)
+
+เมื่อได้งานโปรเจกต์ อบต. ใหม่ ทำตามขั้นตอนนี้ **ทีละข้อ อย่าข้าม:**
+
+> 🚨 **กฎเหล็กข้อ 0 — ห้ามก๊อปปี้จากโปรเจกต์ อบต. อื่นที่มีข้อมูลจริงเด็ดขาด**
+> เคยเกิดบั๊กจริง: ก๊อปปี้โฟลเดอร์ lalom (มีข้อมูลจริงติดอยู่ใน `data/parcel.geojson`) ไปทำ takhianram แล้วลืมแทนที่ไฟล์ข้อมูล ผลคือเว็บตะเคียนรามขึ้นแปลงที่ดินของ อบต. ละลมทับซ้อนอยู่บนแผนที่ ต้องแก้ให้ก๊อปปี้จาก **`ltaxmap-template`** (โฟลเดอร์ต้นแบบที่ `data/*.geojson` ทุกไฟล์เป็น `{"type":"FeatureCollection","features":[]}` เปล่าๆ) เท่านั้น ถ้ายังไม่มีโฟลเดอร์นี้ ให้สร้างไว้ก่อนเริ่มงาน อบต. ถัดไป
+
+### ขั้นตอนที่ 1 — เตรียมโปรเจกต์
+
+1. คัดลอกโปรเจกต์จาก **`ltaxmap-template`** (ห้ามก๊อปปี้จากโปรเจกต์ อบต. อื่น) ไปเป็นโฟลเดอร์ใหม่
+2. ตั้งชื่อ repo/โฟลเดอร์ตามรหัส อบต. ใหม่ เช่น `TakhianRam`, `Lalom`
+
+### ขั้นตอนที่ 2 — แก้ Backend (2 ไฟล์)
+
+**`_worker.js`** — เพิ่มรหัส อบต. ใหม่ใน `ALLOWED_ABT`:
+
+```javascript
+const ALLOWED_ABT = ["lalom", "takhianram", "ชื่ออบต_ใหม่"];
+```
+
+**`wrangler.jsonc`** — เปลี่ยนชื่อ Worker:
 
 ```jsonc
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "lalom",                    // ชื่อ Worker บน Cloudflare — ต้องตรงกับชื่อ project ใน dashboard
-  "main": "_worker.js",               // ไฟล์ entry point ของ backend
-  "compatibility_date": "2026-07-16",
-  "compatibility_flags": ["nodejs_compat"],
-  "assets": {
-    "directory": "public",            // โฟลเดอร์ที่เก็บไฟล์ static (แยกจาก _worker.js)
-    "binding": "ASSETS"               // ชื่อตัวแปรที่ใช้เรียกไฟล์ static จากในโค้ด _worker.js
-  },
-  "kv_namespaces": [
-    {
-      "binding": "PARCEL_KV",         // ชื่อตัวแปรที่โค้ดใช้เรียก KV (ต้องตรงกับใน _worker.js)
-      "id": "f5d59bd667e74533a92894342a3e4db1"  // ID ของ KV namespace บน Cloudflare
-    }
-  ],
-  "observability": {
-    "enabled": true                   // เปิด logging เพื่อ debug ทีหลังได้
-  }
+  "name": "ชื่ออบต_ใหม่",
+  ...
 }
 ```
 
-**จุดที่ผิดพลาดบ่อย:**
-- ชื่อ `"binding"` ของ KV ต้องตรงกับที่โค้ดเรียกใช้เป๊ะๆ (เช่น `env.PARCEL_KV`) ถ้าไม่ตรง โค้ดจะได้ `undefined` แล้ว error ทันที
-- `"id"` ของ KV ต้องเป็น namespace ที่มีอยู่จริงบน Cloudflare (เช็คได้ที่ Dashboard → Workers & Pages → KV)
-- `"directory"` ใน `assets` ต้องชี้ไปที่โฟลเดอร์ static เท่านั้น **ห้ามเป็น `"."` (root)** เพราะจะทำให้ `_worker.js` ถูกนับเป็น asset ไปด้วย
+### ขั้นตอนที่ 3 — แก้ Frontend (1 ไฟล์เดียว!)
 
----
+**`public/js/config.js`** — แก้บรรทัดเดียวเท่านั้น:
 
-## 5. ทำความเข้าใจ _worker.js
-
-หน้าที่ของ `_worker.js` คือรับ request ทุกอย่างที่เข้ามา แล้วตัดสินใจว่า:
-- ถ้า URL คือ `/api/save` (POST) หรือ `/api/load` (GET) → รันฟังก์ชัน backend ของเราเอง (อ่าน/เขียนข้อมูลใน KV)
-- ถ้าไม่ใช่ → ส่งต่อให้ Cloudflare เสิร์ฟไฟล์ static จากโฟลเดอร์ `public/` ตามปกติ (ผ่าน `env.ASSETS.fetch(request)`)
-
-```js
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/save" && request.method === "POST") {
-      return handleSave(request, env, url);
-    }
-    if (url.pathname === "/api/load" && request.method === "GET") {
-      return handleLoad(request, env, url);
-    }
-
-    // ไม่ใช่ API ของเรา -> ส่งต่อให้เสิร์ฟไฟล์ static ตามปกติ
-    return env.ASSETS.fetch(request);
-  },
-};
+```javascript
+const ABT_CODE = "ชื่ออบต_ใหม่";
 ```
 
-### ฟังก์ชันหลัก
-- **`handleSave`** — รับ GeoJSON จาก frontend, บันทึกลง KV เป็นข้อมูลหลัก + สร้าง backup รายวัน + ลบ backup ที่เก่าเกิน 30 วันทิ้งอัตโนมัติ
-- **`handleLoad`** — ดึงข้อมูล GeoJSON ล่าสุดที่เคยบันทึกไว้กลับมาให้ frontend
+พร้อมทั้งอัปเดตพิกัดแผนที่ตั้งต้นให้ตรงกับพื้นที่ อบต. ใหม่:
 
----
-
-## 6. ระบบ Multi-tenant (รองรับหลาย อบต. ด้วย Worker เดียว)
-
-เดิมทีถ้าเพิ่ม อบต. ใหม่ 1 แห่ง จะต้องสร้าง repo ใหม่, Worker ใหม่, KV namespace ใหม่ — ซึ่งจัดการยากขึ้นเรื่อยๆ เมื่อจำนวน อบต. เพิ่มขึ้น จึงเปลี่ยนมาใช้ **Worker เดียว + KV เดียว** แล้วแยกข้อมูลด้วยการตั้งชื่อ key
-
-### หลักการ
-ทุก request ไปยัง `/api/save` และ `/api/load` ต้องแนบ **query parameter `?abt=<รหัส>`** มาด้วย เช่น:
-```
-POST /api/save?abt=lalom
-GET  /api/load?abt=lalom
+```javascript
+const START_CENTER = [lat, lng];  // พิกัดจุดศูนย์กลางตำบลใหม่
+const START_ZOOM   = 14;
 ```
 
-โค้ดจะเก็บข้อมูลลง KV โดยใช้ key แบบมี prefix:
-```
-abt-lalom:parcel.geojson
-abt-lalom:backup-2026-07-17.geojson
-abt-ltaxmap:parcel.geojson
-abt-ltaxmap:backup-2026-07-17.geojson
-```
+### ขั้นตอนที่ 3.5 — ใส่ข้อมูลจริง (ห้ามข้าม)
 
-### รายชื่อ อบต. ที่อนุญาต
-ใน `_worker.js` มีตัวแปร whitelist กันพิมพ์ผิด/กันสร้าง key มั่ว:
-```js
-const ALLOWED_ABT = ["lalom", "ltaxmap"];
-```
-ถ้าเรียก API โดยไม่ส่ง `abt` หรือส่งรหัสที่ไม่อยู่ในลิสต์นี้ ระบบจะตอบกลับ error `400` ทันที (กันข้อมูลปนกันโดยไม่ตั้งใจ)
+แทนที่ไฟล์ `data/*.geojson` ทุกตัว (parcel, block, zone, boundary, building, spk ฯลฯ) ที่เป็น template เปล่าๆ ด้วยข้อมูลจริงของ อบต. ใหม่ แล้ว**เปิดไฟล์ดูด้วยตาก่อน commit** — เช็คว่าเป็นข้อมูลของ อบต. ใหม่จริง ไม่ใช่ไฟล์เก่าที่หลงมาจากโปรเจกต์อื่น
 
-### ข้อดีของวิธีนี้
-- ✅ เพิ่ม อบต. ใหม่ = แก้โค้ด 2 จุดเท่านั้น ไม่ต้องสร้าง infrastructure ใหม่
-- ✅ ข้อมูลแต่ละ อบต. แยกกันเด็ดขาด ไม่มีทางปนกัน
-- ✅ ดูแล/แก้ไขโค้ดจุดเดียว ใช้ได้กับทุก อบต.
+### ขั้นตอนที่ 4 — แก้ข้อความหน้าเว็บ
 
----
+**`public/index.html`** — แก้ชื่อตำบลบน Toolbar:
 
-## 7. ฝั่ง Frontend ต้องแก้อะไรบ้าง
-
-Frontend เดิมเรียก `fetch('/api/save')` และ `fetch('/api/load')` เฉยๆ โดยไม่มีการระบุ อบต. ต้องแก้ 3 ไฟล์:
-
-### 7.1 `index.html` — กำหนดรหัส อบต. ของเว็บนี้
-เพิ่มก่อนโหลดสคริปต์อื่นๆ ทั้งหมด:
 ```html
-<script>
-  // รหัส อบต. สำหรับเว็บไซต์นี้ — ต้องตรงกับรายชื่อ ALLOWED_ABT ใน _worker.js
-  window.ABT_CODE = "lalom";
-</script>
-<script src="js/config.js"></script>
+<span class="fw-bold text-primary me-3 d-none d-md-inline">
+  <i class="fas fa-map-marked-alt"></i> ตำบล {ชื่อตำบลใหม่}
+</span>
 ```
 
-### 7.2 `js/layers.js` — ส่ง `abt` ตอนโหลดข้อมูล
-```js
-const abtParam = encodeURIComponent(window.ABT_CODE || "");
-const savedRes = await fetch(`/api/load?abt=${abtParam}`, { cache: "no-store" });
-```
+### ขั้นตอนที่ 5 — เปิดใช้งาน Domain
 
-### 7.3 `js/storage.js` — ส่ง `abt` ตอนบันทึกข้อมูล
-```js
-const abtParam = encodeURIComponent(window.ABT_CODE || "");
-const saveUrl = `/api/save?abt=${abtParam}`;
-```
+1. เข้า **Cloudflare Dashboard → Workers & Pages → {ชื่อ-อบต-ใหม่}**
+2. ไปที่ **Settings → Domains & Routes**
+3. กด **Enable** ที่หัวข้อ **workers.dev**
+4. ระบบจะสร้างลิงก์ให้เป็น `{ชื่อ-อบต-ใหม่}.ltaxmap.workers.dev`
 
-**หมายเหตุ:** ถ้าแต่ละ อบต. มีหน้าเว็บ (`index.html`) แยกกันคนละชุด (เพราะข้อมูล layer พื้นฐานต่างกัน) ให้เปลี่ยนแค่ค่า `window.ABT_CODE` ในแต่ละชุดให้ตรงกับ อบต. นั้นๆ โดยที่ `_worker.js`, `wrangler.jsonc` ยังใช้ตัวเดียวกันได้
+### ขั้นตอนที่ 6 — Deploy
 
----
-
-## 8. ขั้นตอนตั้งค่าตั้งแต่ศูนย์
-
-### ขั้นที่ 1 — สร้าง KV Namespace (ทำครั้งเดียว ใช้ได้ตลอด)
-1. เข้า Cloudflare Dashboard → เมนูซ้าย **Storage & Databases → Workers KV**
-2. กด **Create** ตั้งชื่อ (เช่น `parcel-data-shared`)
-3. คัดลอก **ID** ที่ได้มาเก็บไว้ (จะใช้ใส่ใน `wrangler.jsonc`)
-
-### ขั้นที่ 2 — เตรียมไฟล์ในเครื่อง/Git repo
-จัดโครงสร้างตามหัวข้อ [3. โครงสร้างไฟล์ในโปรเจกต์](#3-โครงสร้างไฟล์ในโปรเจกต์) ให้ครบ:
-- `_worker.js` ที่ root
-- `wrangler.jsonc` ที่ root (ใส่ KV ID ที่ได้จากขั้นที่ 1)
-- โฟลเดอร์ `public/` เก็บไฟล์ static ทั้งหมด
-
-### ขั้นที่ 3 — Push ขึ้น GitHub
 ```bash
-git add .
-git commit -m "Setup multi-tenant Worker structure"
-git push
+npx wrangler deploy
 ```
 
-### ขั้นที่ 4 — สร้าง/เชื่อม Worker บน Cloudflare Dashboard
-1. **Workers & Pages → Create → Import a repository** (หรือเชื่อม repo เดิมถ้ามีอยู่แล้ว)
-2. เลือก repo ที่ต้องการ (เช่น `noom25/lalom`)
-3. ตั้งค่า **Deploy command**: `npx wrangler deploy`
-4. Build command ปล่อยว่างได้ (ไม่มีขั้นตอน build)
-5. กด Deploy
+---
 
-### ขั้นที่ 5 — เปิดใช้งาน Worker URL
-1. เข้าไปที่ project → แท็บ **Domains**
-2. กด toggle เปิด **Production** (`<worker-name>.<subdomain>.workers.dev`)
-3. รอ 10-30 วินาที แล้วลองเข้า URL
+## 5. ขั้นตอนการทดสอบหลัง Deploy
 
-### ขั้นที่ 6 — ตรวจสอบ Bindings
-เข้าไปที่แท็บ **Bindings** เช็คว่ามีครบ:
-- **Assets** → ASSETS
-- **KV namespace** → PARCEL_KV → ผูกกับ namespace ที่สร้างไว้
+1. **เปิดหน้าเว็บ PWA** ผ่านโดเมนใหม่โดยตรง (อย่าใช้ URL เก่าที่จำไว้)
+2. **Hard Refresh** ด้วย `Ctrl + Shift + R` เพื่อล้าง Cache เดิม
+3. **ตรวจสอบพิกัดเริ่มต้น** — แผนที่ต้องเลื่อนไปแสดงพื้นที่ อบต. ใหม่โดยอัตโนมัติ ไม่ใช่พื้นที่ อบต. เก่า
+4. 🚨 **ก่อนวาดอะไรเลย ให้มองแปลงที่ดินที่ขึ้นมาบนแผนที่ก่อน** — ต้องอยู่ในเขต อบต. ใหม่จริง ไม่ใช่ไปโผล่ผิดที่คนละตำบล (สัญญาณว่าไฟล์ `data/parcel.geojson` ยังเป็นของเก่าที่ไม่ได้แทนที่ — เคยเกิดขึ้นจริงกับ takhianram)
+5. **ตรวจสอบชื่อบน Toolbar** — ต้องขึ้นชื่อ อบต. ใหม่ถูกต้อง
+6. **ทดสอบการบันทึกข้อมูล:**
+   - วาดแปลงที่ดินใหม่ 1 แปลง
+   - กดปุ่ม **บันทึก (Save)** หรือ `Ctrl+S`
+   - ต้องขึ้นข้อความ "✅ บันทึกเรียบร้อย"
+7. **ตรวจสอบใน Cloudflare Dashboard → Workers & Pages → KV → PARCEL_KV (test-kv)** ต้องเห็น Key ใหม่:
+   - `abt-{ชื่ออบต_ใหม่}:parcel.geojson`
+   - `abt-{ชื่ออบต_ใหม่}:backup-YYYY-MM-DD.geojson`
+8. **โหลดหน้าเว็บใหม่อีกครั้ง (Refresh)** — ข้อมูลที่เพิ่งบันทึกต้องโหลดกลับมาแสดงถูกต้อง (ยืนยันว่า Save/Load ใช้ `ABT_CODE` ตัวเดียวกันจริง)
 
 ---
 
-## 9. วิธีเพิ่ม อบต. ใหม่ในอนาคต
+## 6. Checklist ก่อนขึ้นระบบจริงทุกครั้ง
 
-ไม่ต้องสร้าง Worker หรือ KV ใหม่เลย ทำแค่ 2 จุด:
+| ที่ | รายการ | ไฟล์ |
+|:---:|---|---|
+| 0 | ก๊อปปี้โปรเจกต์จาก `ltaxmap-template` (ข้อมูลเปล่า) เท่านั้น **ห้าม**ก๊อปปี้จากโปรเจกต์ อบต. อื่นที่มีข้อมูลจริง | ทั้งโฟลเดอร์ |
+| 1 | เพิ่มรหัส อบต. ใหม่ใน `ALLOWED_ABT` (ไม่ใส่ `ltaxmap`) | `_worker.js` |
+| 2 | แก้ `"name"` ให้ตรงกับ Worker บน Cloudflare | `wrangler.jsonc` |
+| 3 | แก้ `ABT_CODE` เป็นรหัส อบต. ใหม่ (และเช็ค `API_LOAD_URL`/`API_SAVE_URL` ประกาศครบ) | `public/js/config.js` |
+| 4 | แก้ `START_CENTER` / `START_ZOOM` ตามพื้นที่ใหม่ | `public/js/config.js` |
+| 5 | **แทนที่ `data/*.geojson` ทุกไฟล์ด้วยข้อมูลจริง แล้วเปิดดูด้วยตาว่าไม่ใช่ไฟล์เก่าที่หลงมา** | `public/data/*.geojson` |
+| 6 | แก้ข้อความชื่อตำบลบน Toolbar | `public/index.html` |
+| 7 | เปิดใช้งาน `workers.dev` Domain | Cloudflare Dashboard |
+| 8 | Deploy ด้วย `npx wrangler deploy` | Terminal |
+| 9 | **มองแผนที่ก่อนวาดอะไรเลย** — แปลงต้องอยู่ในเขต อบต. ใหม่จริง | เว็บจริง |
+| 10 | ทดสอบ Save/Load ครบวงจรตามข้อ 5 | เว็บจริง |
+| 11 | เช็กว่าไม่มีไฟล์ไหน hardcode `?abt=` ตรง ๆ อีก (ค้นหาทั้งโปรเจกต์ ต้องเจอแค่ 2 บรรทัดใน `config.js`) | ค้นหาทั้งโปรเจกต์ |
 
-### จุดที่ 1 — แก้ `_worker.js`
-เพิ่มรหัส อบต. ใหม่เข้าไปใน whitelist:
-```js
-const ALLOWED_ABT = ["lalom", "ltaxmap", "รหัสอบตใหม่"];
+---
+
+## 7. Troubleshooting — ปัญหาที่เคยเจอจริงและวิธีแก้
+
+### 7.1 ข้อมูล อบต. เก่าปนกับ อบต. ใหม่ทั้งเว็บ
+
+**อาการ:** เปิดเว็บ อบต. ใหม่แต่ข้อมูล/ข้อความยังเป็นของ อบต. เก่าทั้งหมด
+
+**สาเหตุที่พบจริง:** ไฟล์ `layers.js` (ตอนโหลดข้อมูล) hardcode ชื่อ อบต. เก่าไว้ตรง ๆ แยกจากไฟล์ `storage.js` (ตอนบันทึก) ที่ใช้ชื่อ อบต. ใหม่ ทำให้ระบบบันทึกไปที่หนึ่งแต่โหลดจากอีกที่หนึ่ง
+
+**วิธีแก้ถาวร:** ใช้ระบบ `ABT_CODE` รวมศูนย์ตามข้อ 3 — ค้นหาทั้งโปรเจกต์ด้วย `Ctrl+Shift+F` ใน VS Code หาคำว่าชื่อ อบต. เก่า (เช่น `lalom`) ให้แน่ใจว่าไม่มีหลงเหลือในไฟล์ไหนอีก
+
+### 7.2 Error 400 ตอนกด Save/Load
+
+**สาเหตุ:** รหัส อบต. ที่ส่งไปไม่อยู่ใน `ALLOWED_ABT` ของ `_worker.js`
+
+**วิธีแก้:** เพิ่มรหัส อบต. เข้าไปในลิสต์ แล้ว Deploy ใหม่
+
+### 7.3 สถานะ Worker ขึ้น "No active routes"
+
+**สาเหตุ:** ยังไม่ได้เปิดใช้งาน `*.workers.dev` Subdomain
+
+**วิธีแก้:** Settings → Domains & Routes → กด Enable ที่ workers.dev
+
+### 7.4 บันทึกข้อมูลแล้ว KV Storage ยังขึ้น 0 B
+
+**สาเหตุที่พบจริง:** Worker ผูกกับ KV Namespace คนละตัวกับที่กำลังดูอยู่ใน Dashboard (มี KV เก่าชื่อคล้ายกันค้างอยู่จากการทดสอบครั้งก่อน)
+
+**วิธีเช็ก:** เทียบ **KV Namespace ID** ในหน้า `Workers KV` list กับ ID ที่ระบุใน `wrangler.jsonc` (`kv_namespaces > id`) ให้ตรงกันเป๊ะ ไม่ใช่ดูแค่ชื่อ
+
+### 7.5 เปิดเว็บ อบต. ใหม่ แต่แปลงที่ดินไปโผล่ผิดพื้นที่ (ไม่ใช่ 7.1 แบบข้อความ แต่ตำแหน่งบนแผนที่ผิด)
+
+**อาการ:** ชื่อ Toolbar, การ Save/Load ถูกต้องหมด แต่พอเปิดเว็บครั้งแรกก่อนวาดอะไร แปลงที่ดินที่ขึ้นมาไปอยู่คนละตำแหน่งกับเขต อบต. ใหม่ (เช่น ไปโผล่ห่างออกไปหลายกิโลเมตร)
+
+**สาเหตุที่พบจริง:** ก๊อปปี้โฟลเดอร์จาก อบต. เดิมที่มีข้อมูลจริงติดมาในไฟล์ `data/parcel.geojson` แล้วลืมแทนที่ด้วยข้อมูลของ อบต. ใหม่ พอ KV ยังไม่เคยมีการ save (`/api/load` ตอบ 404) ระบบเลย fallback ไปใช้ไฟล์ static เก่านั้นแทน
+
+**วิธีแก้ถาวร:** ใช้กฎเหล็กข้อ 0 ในข้อ 4 — ก๊อปปี้จาก `ltaxmap-template` (ข้อมูลเปล่า) เท่านั้น และทำตาม Checklist ข้อ 5 กับข้อ 9 ทุกครั้ง
+
+### 7.6 Restore จาก GitHub แล้วบั๊กเก่ากลับมาใหม่
+
+**อาการ:** เคยแก้บั๊ก `?abt=` หายไปแล้ว (ตามข้อ 7.2) แต่หลังจาก restore/revert โค้ดกลับไปที่ commit เก่าผ่านหน้า GitHub บั๊กเดิมก็กลับมาอีก
+
+**สาเหตุ:** การ restore ทั้งไฟล์ (หรือทั้ง repo) กลับไป commit ก่อนหน้า จะพาการแก้ไขทุกอย่างที่ทำหลังจากนั้นหายไปด้วย ไม่ใช่แค่ส่วนที่ตั้งใจจะย้อน
+
+**วิธีแก้/ป้องกัน:**
+- หลัง restore ทุกครั้ง ให้รันเช็ค Checklist ข้อ 11 ใหม่อีกรอบ (ค้นหา `?abt=` ทั้งโปรเจกต์)
+- ถ้าเป็นไปได้ ให้ restore **เฉพาะไฟล์ที่มีปัญหาจริง** แทนการ revert ทั้ง repo เพื่อไม่ให้กระทบไฟล์อื่นที่แก้ไว้ถูกแล้ว
+
+### 7.7 Tool Call ค้างตอนใช้ AI ช่วยแก้โค้ด (OpenCode)
+
+**สาเหตุ:** โมเดลบางตัว (โดยเฉพาะ DeepSeek-R1) มีปัญหากับระบบอ่านไฟล์อัตโนมัติของ OpenCode
+
+**วิธีแก้:**
+- เปิดเซสชันใหม่ แล้วระบุไฟล์ด้วย `@ไฟล์` ตรง ๆ แทนการสั่งสแกนทั้งโฟลเดอร์
+- ถ้าใช้ `@` ไม่ได้เพราะไฟล์เยอะเกิน ให้ระบุเฉพาะไฟล์แกนหลัก 4–5 ไฟล์แทน
+- สลับไปใช้ Claude Sonnet 5 ถ้าต้องสแกนทั้งโฟลเดอร์อย่างเสถียร
+
+---
+
+## 8. การจัดการ Cloudflare KV Dashboard
+
+**โครงสร้าง Key ที่ถูกต้อง:**
+
+```
+abt-{ชื่ออบต}:parcel.geojson
+abt-{ชื่ออบต}:backup-YYYY-MM-DD.geojson
 ```
 
-### จุดที่ 2 — เตรียม index.html สำหรับ อบต. ใหม่
-- ถ้าใช้หน้าเว็บเดียวกันทั้งหมด (URL เดียว ให้ผู้ใช้เลือก อบต. เอง) → ต้องปรับ logic เพิ่มเติมให้เลือก `ABT_CODE` แบบ dynamic (เช่นจาก URL parameter หรือหน้าจอเลือก อบต.)
-- ถ้าแต่ละ อบต. มีเว็บแยกกัน (คนละ path หรือคนละ repo ที่ deploy ไปยัง Worker เดียวกัน) → คัดลอกชุด `index.html` + `js/` เดิม แล้วแก้แค่:
-  ```html
-  window.ABT_CODE = "รหัสอบตใหม่";
-  ```
-  พร้อมเปลี่ยนไฟล์ข้อมูลตั้งต้นใน `data/` ให้เป็นของ อบต. นั้น
+**วิธีเช็กว่าใช้ KV ถูกตัว:**
 
-### จุดที่ 3 — commit + push + retry build
-เสร็จแล้ว อบต. ใหม่จะมีข้อมูลแยกเป็นสัดส่วนอัตโนมัติ ไม่ปนกับ อบต. อื่น
+1. เปิด **Cloudflare Dashboard → Workers KV**
+2. ดูรายชื่อ Namespace ทั้งหมดที่มี (อาจมีหลายตัวจากการทดสอบเก่า)
+3. เปิด `wrangler.jsonc` เทียบค่า `kv_namespaces[0].id`
+4. หา Namespace ที่มี **ID ตรงกันเป๊ะ** — นั่นคือตัวที่ใช้งานจริง
+5. เข้าไปดู **KV Pairs** ของตัวนั้น ต้องเห็น Key ขึ้นต้นด้วย `abt-` เสมอ ถ้าเห็น Key แบบไม่มี prefix (เช่น `parcel.geojson` เฉย ๆ) แปลว่าเป็นข้อมูลเก่าจากก่อนทำระบบ Multi-Tenant
 
----
-
-## 10. ปัญหาที่เจอบ่อย และวิธีแก้
-
-### ❌ `Uploading a Pages _worker.js file as an asset`
-**สาเหตุ:** `_worker.js` อยู่ในโฟลเดอร์เดียวกับที่ตั้งเป็น `assets.directory`
-**วิธีแก้ที่แนะนำ:** ย้าย `_worker.js` ออกมาไว้ที่ root แยกจากโฟลเดอร์ asset (เช่น `public/`) แล้วตั้ง `"assets": { "directory": "public" }` ใน `wrangler.jsonc`
-**วิธีแก้ชั่วคราว (ถ้าจำเป็น):** สร้างไฟล์ `.assetsignore` (สังเกตว่าต้องขึ้นต้นด้วย **จุด** ไม่ใช่ขีดล่าง `_`) ใส่ข้อความ `_worker.js` ไว้ข้างใน วางไว้ที่ root ของ asset directory
-
-### ❌ Failed to match Worker name
-**สาเหตุ:** ชื่อใน `"name"` ของ `wrangler.jsonc` ไม่ตรงกับชื่อ project บน Cloudflare dashboard
-**วิธีแก้:** แก้ `"name"` ใน `wrangler.jsonc` ให้ตรงกับชื่อ project (ไม่กระทบการ deploy เพราะ CI จะ override ให้อัตโนมัติ แต่ควรแก้ให้ตรงเพื่อความเรียบร้อย)
-
-### ❌ Worker deploy สำเร็จ แต่เข้าเว็บไม่ได้ ("No active routes")
-**สาเหตุ:** ยังไม่ได้เปิดใช้งาน `workers.dev` subdomain
-**วิธีแก้:** เข้า project → แท็บ **Domains** → กด toggle เปิด **Production**
-
-### ❌ กด "บันทึก" แล้ว error 400 "ไม่ระบุ อบต."
-**สาเหตุ:** Frontend เรียก `/api/save` หรือ `/api/load` โดยไม่มี `?abt=...` หรือรหัสไม่อยู่ใน `ALLOWED_ABT`
-**วิธีแก้:** เช็คว่า `window.ABT_CODE` ใน `index.html` ถูกตั้งค่าไว้ และตรงกับรายชื่อใน `_worker.js`
-
-### ❌ ข้อมูลหาย/ไม่โผล่หลัง deploy ใหม่
-**สาเหตุที่เป็นไปได้:** ใช้ KV namespace ID คนละตัวกับที่เคยบันทึกข้อมูลไว้
-**วิธีแก้:** เช็ค `"id"` ใน `kv_namespaces` ของ `wrangler.jsonc` ว่าตรงกับ namespace ที่มีข้อมูลอยู่จริง (เช็ค Storage size ได้ที่ Dashboard → Workers KV)
+**ระบบ Auto Backup & Cleanup:** `_worker.js` จะสร้าง backup รายวันอัตโนมัติทุกครั้งที่ Save และลบ backup ที่เก่าเกิน 30 วันให้เองแบบไม่กระทบข้อมูลหลัก (ตัวแปร `RETENTION_DAYS` ปรับได้ในไฟล์นี้)
 
 ---
 
-## 11. Checklist ทดสอบระบบหลัง Deploy
+## 9. เทคนิคใช้งาน AI/OpenCode ให้ประหยัดและไม่ค้าง
 
-- [ ] เข้า URL `https://<worker-name>.<subdomain>.workers.dev` ได้ ไม่ขึ้น error
-- [ ] แผนที่และ layer ต่างๆ โหลดขึ้นมาปกติ (เช็ค Console กด F12 ว่าไม่มี error สีแดง)
-- [ ] ลองวาด/แก้ไขแปลงที่ดิน แล้วกด **บันทึก** → ขึ้นข้อความ `✅ บันทึกเรียบร้อย (อบต: <รหัส>)`
-- [ ] Reload หน้าเว็บใหม่ → ข้อมูลที่เพิ่งบันทึกยังอยู่ (พิสูจน์ว่า `/api/load` ทำงานถูกต้อง)
-- [ ] เช็ค Dashboard → Workers KV → namespace ที่ใช้ → Storage size เพิ่มขึ้นจาก 0 B (พิสูจน์ว่าบันทึกลง KV จริง)
-- [ ] ถ้ามีมากกว่า 1 อบต. → ลองสลับ `ABT_CODE` แล้วเช็คว่าข้อมูลแต่ละ อบต. ไม่ปนกัน
+- **ระบุไฟล์เฉพาะเจาะจง** ด้วย `@ไฟล์` แทนสั่งสแกนทั้งโฟลเดอร์ ประหยัด Token มาก
+- **ตั้งโมเดลยืนพื้น** เช่น DeepSeek V3.1 สำหรับงานเขียน/แก้โค้ดทั่วไป (ราคาถูก เสถียรกว่า R1)
+- **สลับ Claude Sonnet 5 เฉพาะกิจ** ตอนติดบั๊กซับซ้อนหรือ Tool Call ค้าง แล้วสลับกลับ
+- **ย้ายโฟลเดอร์ Backup/รูปภาพออกนอกโปรเจกต์หลัก** เช่น ย้าย `back up_ltax-survey`, `screenshots`, `scanned_data` ไปไว้นอกโฟลเดอร์ที่ AI สแกน จะช่วยให้ค้นหาไฟล์เร็วขึ้นและ AI แม่นยำขึ้น
+- **ใช้ไฟล์ Index/สถานะโปรเจกต์** เช่น `PROJECT_STATUS.md` ช่วยให้ AI เข้าใจสถานะงานโดยไม่ต้องอ่านโค้ดทั้งหมด
 
 ---
-### การเพิ่ม อบต แก้ไขใน worker,layer,storage
-_worker.js → เพิ่มรหัส อบต. ต่อท้ายในลิสต์ ALLOWED_ABT (และเปลี่ยน PARCEL_KV เป็น KV_BINDING ให้ตรงกับ binding ของ project map)
-storage.js → เติม ?abt=<รหัสอบต.นั้น> ต่อท้าย /api/save
-layers.js → เติม ?abt=<รหัสอบต.นั้น> ต่อท้าย /api/load
-ตัวอย่าง
-#layer# // const savedRes = await fetch('/api/load?abt=lalom', { cache: "no-store" });
-#storage#// เรียก Cloudflare Worker (ต้องระบุ abt เสมอ ไม่งั้น worker จะปฏิเสธด้วย 400)
-  const saveUrl = '/api/save?abt=lalom';
 
-*(เพิ่มแถวใหม่ทุกครั้งที่ติดตั้งให้ อบต. เพิ่ม)*
+## 10. คำถามที่พบบ่อย (FAQ)
 
-*เอกสารนี้จัดทำขึ้นจากประสบการณ์ตั้งค่าจริงของโปรเจกต์ `noom25/lalom` — อัปเดตล่าสุดตามสถานะระบบล่าสุดที่ deploy สำเร็จ*
+**Q: ต้องสร้าง KV Namespace ใหม่ทุกครั้งที่เพิ่ม อบต. ไหม?**
+A: ไม่ต้องครับ ใช้ KV ตัวเดียว (`test-kv` / `PARCEL_KV`) ร่วมกันได้ทุก อบต. เพราะระบบแยกข้อมูลด้วย Key Prefix (`abt-`) อยู่แล้ว
+
+**Q: ต้องสร้าง Worker ใหม่ทุก อบต. ไหม?**
+A: ต้องครับ — แต่ละ อบต. ควรมี Worker แยกกัน (คนละโดเมน `{ชื่อ-อบต}.ltaxmap.workers.dev`) เพื่อให้ผู้ใช้แต่ละพื้นที่เข้าเว็บของตัวเองได้ตรง แต่ทุก Worker เชื่อมกับ KV ตัวเดียวกันได้
+
+**Q: ถ้าลืมเพิ่มรหัส อบต. ใน `ALLOWED_ABT` จะเกิดอะไรขึ้น?**
+A: ระบบจะตีกลับ Error 400 ทันทีตอนกด Save/Load พร้อมข้อความ "ไม่ระบุ อบต. หรือรหัส อบต. ไม่ถูกต้อง"
+
+**Q: ข้อมูลของ อบต. เดิมจะหายไหมถ้าตั้งค่าผิดตอนเพิ่ม อบต. ใหม่?**
+A: ไม่หายครับ ตราบใดที่ `ABT_CODE` ของแต่ละโปรเจกต์ไม่ชนกัน เพราะ Key ใน KV แยกด้วย Prefix ต่างกันเสมอ (`abt-lalom:...` ≠ `abt-takhianram:...`) แต่ต้องระวังไม่ให้ 2 อบต. ตั้งค่า `ABT_CODE` เป็นค่าเดียวกันโดยไม่ตั้งใจ
+
+**Q: `ltaxmap` (map.ltaxmap.workers.dev) เกี่ยวข้องกับระบบ Multi-Tenant นี้ไหม?**
+A: ไม่เกี่ยวครับ `ltaxmap` เป็นระบบหลักแยกต่างหาก ใช้ Netlify Blobs เก็บข้อมูล ไม่ได้ผูกกับ KV หรือ `ALLOWED_ABT` ของ `_worker.js` ตัวนี้เลย ห้ามใส่ `"ltaxmap"` เข้าไปใน `ALLOWED_ABT` โดยเด็ดขาด
+
+**Q: Restore/revert โค้ดจาก GitHub แล้วบั๊กที่เคยแก้กลับมาใหม่ ทำไง?**
+A: การ restore ทั้งไฟล์หรือทั้ง repo กลับไป commit เก่า จะพา fix ทุกอย่างหลังจากนั้นหายไปด้วย หลัง restore ทุกครั้งต้องไล่เช็ค Checklist ข้อ 11 ใหม่ (ค้นหา `?abt=` ทั้งโปรเจกต์ ต้องเจอแค่ใน `config.js`) — ดูรายละเอียดที่ข้อ 7.6
+
+---
+
+*จัดทำขึ้นเพื่อใช้ประกอบการปฏิบัติงานจัดทำแผนที่ภาษีและทะเบียนทรัพย์สิน (LTAX MAP) — รองรับการขยายระบบไปหลาย อบต. ในอนาคต*
