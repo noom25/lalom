@@ -1,5 +1,9 @@
 /* ====================== CONFIGURATION ====================== */
 
+// รหัส อบต. ของเว็บนี้ — ต้องตรงกับ ALLOWED_ABT ใน _worker.js
+// (นี่คือจุดเดียวที่ต้องแก้ตอนนำโค้ดชุดนี้ไปทำเว็บให้ อบต. อื่น)
+const ABT_CODE = "lalom";
+
 // Data File Paths
 const DATA_PARCEL   = "data/parcel.geojson";
 const DATA_BLOCK    = "data/block.geojson";
@@ -90,6 +94,7 @@ const $ = (id) => document.getElementById(id);
 // Export for modules
 if (typeof window !== 'undefined') {
   window.CONFIG = {
+    ABT_CODE,
     DATA_PARCEL,
     DATA_BLOCK,
     DATA_ZONE,

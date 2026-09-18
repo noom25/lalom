@@ -420,7 +420,7 @@ async function loadParcels() {
     // 1) ลองโหลดข้อมูลที่เคยบันทึกไว้ผ่าน Netlify Function ก่อน
     //    (ข้อมูลที่วาด/แก้ไขแล้วกด "บันทึก" จะถูกเก็บไว้ที่นี่ ไม่ใช่ไฟล์ data/parcel.geojson เดิม)
     try {
-      const savedRes = await fetch('/api/load?abt=lalom', { cache: "no-store" });
+      const savedRes = await fetch(`/api/load?abt=${CONFIG.ABT_CODE}`, { cache: "no-store" });
       if (savedRes.ok) {
         parcelGeoJSON = await savedRes.json();
         console.log("✅ โหลดข้อมูลที่เคยบันทึกไว้ (จาก Netlify Blobs)");
