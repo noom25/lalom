@@ -23,7 +23,11 @@ L.CanvasLabels = L.Layer.extend({
     padding:   2,              // ระยะกันชนตอนตรวจทับ (px)
     collision: true,           // ไม่วาดป้ายที่ทับป้ายอื่น (แบบ QGIS)
     maxLabels: 1200,           // เพดานกันเครื่องอืดบนจอใหญ่
-    maxDpr:    2               // iPhone/iPad เป็น 3 — เกินความจำเป็นสำหรับตัวหนังสือ
+    maxDpr:    2,              // iPhone/iPad เป็น 3 — เกินความจำเป็นสำหรับตัวหนังสือ
+
+    fitToParcel: true,         // ย่อตัวอักษรไม่ให้ล้นออกนอกแปลง
+    minFontSize: 8,            // ย่อได้ต่ำสุดเท่านี้
+    hideIfTooSmall: true       // เล็กกว่านั้นแล้วยังไม่พอดี = ไม่ต้องวาด
   },
 
   initialize: function (options) {
@@ -44,7 +48,8 @@ L.CanvasLabels = L.Layer.extend({
       const text = f.properties ? f.properties[prop] : null;
       if (text === null || text === undefined || text === '') continue;
       const p = anchorOf(f.geometry);
-      if (p) out.push({ lng: p[0], lat: p[1], text: String(text) });
+      // w = ความกว้างของแปลงตรงจุดวางป้าย (หน่วยองศา) ไว้คำนวณว่าตัวหนังสือล้นไหม
+      if (p) out.push({ lng: p.x, lat: p.y, w: p.w, text: String(text) });
     }
     return this.setLabels(out);
   },
@@ -134,7 +139,19 @@ L.CanvasLabels = L.Layer.extend({
     if (!this._visible || map.getZoom() < this.options.minZoom) return;
 
     const o = this.options;
+
+    // แยกขนาดตัวอักษรออกมา เพื่อย่อให้พอดีความกว้างแปลงได้
+    const sizeMatch = /(\d*\.?\d+)px/.exec(o.font);
+    const baseSize  = sizeMatch ? parseFloat(sizeMatch[1]) : 11;
+    const fontAt    = function (px) { return o.font.replace(/(\d*\.?\d+)px/, px + 'px'); };
+
+    // พิกเซลต่อ 1 องศาลองจิจูด — ใน Web Mercator แกน x เป็นเส้นตรง คิดครั้งเดียวพอ
+    const pxPerDeg = o.fitToParcel
+      ? (map.latLngToContainerPoint([0, 1]).x - map.latLngToContainerPoint([0, 0]).x)
+      : 0;
+
     ctx.font         = o.font;
+    let curSize      = baseSize;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth    = o.haloWidth;
@@ -156,8 +173,25 @@ L.CanvasLabels = L.Layer.extend({
       if (l.lat < south || l.lat > north || l.lng < west || l.lng > east) continue;
 
       const p = map.latLngToContainerPoint([l.lat, l.lng]);
-      const w = ctx.measureText(l.text).width;
-      const hw = w / 2 + o.padding, hh = 6 + o.padding;
+
+      if (curSize !== baseSize) { ctx.font = o.font; curSize = baseSize; }
+      let w = ctx.measureText(l.text).width;
+
+      // ล้นออกนอกแปลงไหม — ถ้าล้นก็ย่อตัวอักษรลงให้พอดี
+      if (o.fitToParcel && l.w > 0) {
+        const avail = l.w * pxPerDeg * 0.92;     // เผื่อขอบไว้นิดหน่อย
+        if (w > avail) {
+          const size = Math.floor(baseSize * avail / w);
+          if (size < o.minFontSize && o.hideIfTooSmall) continue;
+          curSize = Math.max(size, o.minFontSize);
+          ctx.font = fontAt(curSize);
+          w = ctx.measureText(l.text).width;
+          if (w > avail && o.hideIfTooSmall) continue;
+        }
+      }
+
+      const hh = curSize / 2 + o.padding;
+      const hw = w / 2 + o.padding;
       const x0 = p.x - hw, y0 = p.y - hh, x1 = p.x + hw, y1 = p.y + hh;
 
       if (o.collision) {
@@ -178,7 +212,9 @@ L.CanvasLabels = L.Layer.extend({
   }
 });
 
-/* ---------- หาจุดวางป้าย: centroid ของวงนอกที่ใหญ่ที่สุด ---------- */
+/* ---------- หาจุดวางป้าย ---------- */
+// ใช้ centroid ก่อน ถ้าตกนอกแปลง (เกิดกับรูปตัว L, รูปโค้ง, แปลงบิด)
+// จะหาจุดกลางของช่วงที่กว้างที่สุดบนเส้นแนวนอนแทน ซึ่งอยู่ในแปลงเสมอ
 
 function anchorOf(geom) {
   if (!geom) return null;
@@ -188,12 +224,78 @@ function anchorOf(geom) {
   else if (geom.type === 'Point')        return geom.coordinates;
   else return null;
 
-  let best = null, bestArea = -Infinity;
+  // เลือกรูปที่ใหญ่ที่สุด (กรณี MultiPolygon)
+  let poly = null, c = null, bestArea = -Infinity;
   for (let i = 0; i < polys.length; i++) {
-    const c = ringCentroid(polys[i][0]);
-    if (c && c.area > bestArea) { bestArea = c.area; best = [c.x, c.y]; }
+    const cc = ringCentroid(polys[i][0]);
+    if (cc && cc.area > bestArea) { bestArea = cc.area; poly = polys[i]; c = cc; }
   }
-  return best;
+  if (!poly) return null;
+
+  // ลากเส้นแนวนอนผ่านแปลงที่ระดับ centroid แล้วเอาช่วงที่ centroid ตกอยู่
+  // ถ้า centroid ตกนอกแปลง (รูปตัว L, รูปโค้ง) ใช้ช่วงที่กว้างที่สุดแทน
+  if (c) {
+    const p = chordAt(poly, c.y, c.x);
+    if (p) return p;
+  }
+
+  // สำรอง: ลองที่ระดับอื่นของแปลง
+  let y0 = Infinity, y1 = -Infinity;
+  const ring = poly[0];
+  for (let i = 0; i < ring.length; i++) {
+    if (ring[i][1] < y0) y0 = ring[i][1];
+    if (ring[i][1] > y1) y1 = ring[i][1];
+  }
+  const ys = [(y0 + y1) / 2, y0 + (y1 - y0) * 0.4, y0 + (y1 - y0) * 0.6];
+  for (let i = 0; i < ys.length; i++) {
+    const p = chordAt(poly, ys[i], null);
+    if (p) return p;
+  }
+  return c ? { x: c.x, y: c.y, w: 0 } : null;
+}
+
+// หาช่วงที่อยู่ในแปลงบนเส้นแนวนอนระดับ y
+// ถ้าให้ preferX มา จะเลือกช่วงที่ครอบ preferX ไม่งั้นเลือกช่วงที่กว้างที่สุด
+// คืน { x: กลางช่วง, y, w: ความกว้างของช่วง }
+function chordAt(poly, y, preferX) {
+  const xs = [];
+  for (let r = 0; r < poly.length; r++) {        // รวมวงในด้วย เพื่อข้ามรู
+    const ring = poly[r];
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const yi = ring[i][1], yj = ring[j][1];
+      if ((yi > y) !== (yj > y)) {
+        xs.push((ring[j][0] - ring[i][0]) * (y - yi) / (yj - yi) + ring[i][0]);
+      }
+    }
+  }
+  if (xs.length < 2) return null;
+  xs.sort(function (a, b) { return a - b; });
+
+  let bestW = -1, bestX = null;
+  for (let i = 0; i + 1 < xs.length; i += 2) {   // ช่วงคู่ = อยู่ในแปลง
+    const w = xs[i + 1] - xs[i];
+    if (preferX !== null && preferX >= xs[i] && preferX <= xs[i + 1]) {
+      return { x: (xs[i] + xs[i + 1]) / 2, y: y, w: w };
+    }
+    if (w > bestW) { bestW = w; bestX = (xs[i] + xs[i + 1]) / 2; }
+  }
+  if (preferX !== null) return null;             // centroid ไม่อยู่ในแปลง
+  return bestX === null ? null : { x: bestX, y: y, w: bestW };
+}
+
+function inPoly(x, y, poly) {
+  if (!inRing(x, y, poly[0])) return false;
+  for (let h = 1; h < poly.length; h++) if (inRing(x, y, poly[h])) return false;
+  return true;
+}
+
+function inRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
 }
 
 function ringCentroid(ring) {
