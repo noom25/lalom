@@ -1,6 +1,6 @@
 /**
  * _worker.js — ltaxmap (เก็บข้อมูลบน R2)
- * เวอร์ชัน 2.2 — 22 พ.ย. 2569
+ * เวอร์ชัน 2.3 — 22 พ.ย. 2569
  *
  * ไฟล์นี้เหมือนกันทุกตัวอักษรในทุก อบต. — ไม่ต้องแก้อะไรเลย
  * รหัส อบต. ตั้งที่ "vars": { "ABT": "..." } ใน wrangler.jsonc ของแต่ละ repo
@@ -33,10 +33,10 @@
 
 /* ====================== ตั้งค่า ====================== */
 
-// รหัส อบต. มาจาก vars.ABT ใน wrangler.jsonc — ถ้าไม่ได้ตั้งไว้ใช้ค่านี้
-const FALLBACK_ABT = "prueyai";
-
-// รหัสที่อนุญาต กันพิมพ์ผิดแล้วไปสร้างโฟลเดอร์มั่วบน R2
+// รหัส อบต. มาจาก vars.ABT ใน wrangler.jsonc ของแต่ละ repo
+//
+// *** เพิ่ม อบต. ใหม่ต้องเติมชื่อลงในบรรทัดนี้ด้วย ***
+// ถ้าลืม เว็บจะขึ้น error ทันทีพร้อมบอกวิธีแก้ (ไม่ใช่ทำงานต่อแบบผิดๆ)
 const ALLOWED_ABT = ["prueyai", "ltaxmap", "takhianram", "lalom"];
 
 const RETENTION_DAYS = 30;        // เก็บ backup ย้อนหลังกี่วัน
@@ -78,18 +78,40 @@ export default {
 
   // สำรองอัตโนมัติทุกคืน (ตั้งเวลาใน wrangler.jsonc)
   async scheduled(event, env, ctx) {
-    const abt = (env.ABT && ALLOWED_ABT.includes(env.ABT)) ? env.ABT : FALLBACK_ABT;
+    const abt = abtOf(null, env);
+    if (!abt) {
+      console.error("[backup] ไม่ได้สำรองข้อมูล เพราะ ABT ตั้งค่าไม่ถูกต้อง:", env && env.ABT);
+      return;
+    }
     ctx.waitUntil(makeBackup(env, abt));
   },
 };
 
 /* ====================== รหัส อบต. ====================== */
 
+// คืนรหัส อบต. ถ้าตั้งค่าถูก — คืน null ถ้าตั้งค่าผิดหรือยังไม่ได้ตั้ง
+// เมื่อก่อนตรงนี้ตกไปใช้ค่าสำรอง ทำให้ อบต. ที่ตั้งค่าผิดไปเขียนทับข้อมูลของ อบต. แรกแบบเงียบๆ
+// ตอนนี้ยอมให้เว็บขึ้น error ดีกว่าปล่อยให้ทำงานต่อแบบผิดๆ
 function abtOf(url, env) {
-  const q = url.searchParams.get("abt");
+  const q = url && url.searchParams.get("abt");
   if (q && ALLOWED_ABT.includes(q)) return q;          // หน้าเว็บระบุมา (แบบ takhianram/lalom)
   if (env && env.ABT && ALLOWED_ABT.includes(env.ABT)) return env.ABT;   // ตั้งใน wrangler.jsonc
-  return FALLBACK_ABT;
+  return null;
+}
+
+// ข้อความบอกว่าตั้งค่าผิดตรงไหนและต้องแก้ยังไง
+function abtError(env) {
+  return jsonResponse({
+    error: "ตั้งค่ารหัส อบต. ไม่ถูกต้อง ระบบหยุดทำงานเพื่อกันไม่ให้ไปเขียนทับข้อมูลของ อบต. อื่น",
+    ค่าที่ตั้งไว้: (env && env.ABT) ? env.ABT : "(ยังไม่ได้ตั้งค่า ABT)",
+    รายชื่อที่อนุญาต: ALLOWED_ABT,
+    วิธีแก้: [
+      "1. เปิด wrangler.jsonc ดูว่ามี \"vars\": { \"ABT\": \"<รหัส อบต.>\" } หรือยัง",
+      "2. ดูว่ารหัสนั้นมีอยู่ใน ALLOWED_ABT ที่หัวไฟล์ _worker.js หรือยัง",
+      "3. ถ้าเพิ่งเพิ่ม อบต. ใหม่ ต้องเพิ่มชื่อลงใน ALLOWED_ABT ก่อน แล้ว commit ใหม่",
+      "4. ถ้าเผลอลบตัวแปร ABT ใน Cloudflare ให้ไปที่ Deployments แล้วกด Redeploy",
+    ],
+  }, 500);
 }
 
 // คีย์ใน KV เดิม ต่างกันสองแบบ รองรับทั้งคู่ตอนย้าย
@@ -103,6 +125,7 @@ async function serveData(request, env, ctx, url, name) {
   if (!name) return jsonResponse({ error: "ไม่ได้ระบุชื่อไฟล์" }, 400);
 
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
   const cacheable = name !== PARCEL_FILE;   // parcel เปลี่ยนทุกวัน ห้าม cache
 
   if (cacheable) {
@@ -131,6 +154,7 @@ async function serveData(request, env, ctx, url, name) {
 
 async function handleLoad(env, url) {
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
 
   const obj = await env.BUCKET.get(`data/${abt}/${PARCEL_FILE}`);
   if (obj) {
@@ -160,6 +184,7 @@ async function handleLoad(env, url) {
 
 async function handleSave(request, env, url) {
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
 
   const geojson = await request.json();
   if (!geojson || !geojson.features) {
@@ -218,6 +243,7 @@ async function servePT13(request, env, url, rest) {
   }
 
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
   const stem = rest.replace(/\.[A-Za-z0-9]{1,8}$/, "");    // ตัดนามสกุลที่ขอมา
   if (!stem) return env.ASSETS.fetch(request);
 
@@ -244,6 +270,7 @@ async function uploadPT13(request, env, url, rest) {
   }
 
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
   const sent = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
   const ext = sent === "application/pdf" ? "pdf"
             : sent === "image/png"       ? "png"
@@ -324,6 +351,7 @@ async function adminRoute(request, env, url, path) {
   if (!isAdmin(request, env)) return jsonResponse({ error: "token ไม่ถูกต้อง" }, 403);
 
   const abt = abtOf(url, env);
+  if (!abt) return abtError(env);
   const run = url.searchParams.get("run") === "1";
 
   /* ดูว่าใน KV เดิมมีคีย์อะไรอยู่บ้าง — ตรวจก่อนย้าย ไม่แตะต้องข้อมูล */
