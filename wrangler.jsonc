@@ -4,16 +4,38 @@
   "main": "_worker.js",
   "compatibility_date": "2026-07-16",
   "compatibility_flags": ["nodejs_compat"],
+
+  // *** รหัส อบต. ของ repo นี้ — ที่เดียวที่ต่างกันระหว่าง 3 อบต. ***
+  "vars": {
+    "ABT": "lalom"
+  },
+
   "assets": {
     "directory": "public",
     "binding": "ASSETS"
   },
+
+  // bucket เดียวใช้ร่วมกันทั้ง 3 อบต. แยกกันด้วยโฟลเดอร์ data/lalom/
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "ltaxmap"
+    }
+  ],
+
+  // KV เดิม — เก็บไว้เป็นทางถอยระหว่างย้าย ผ่านไป 2 สัปดาห์ค่อยลบบล็อกนี้
   "kv_namespaces": [
     {
       "binding": "PARCEL_KV",
       "id": "f5d59bd667e74533a92894342a3e4db1"
     }
   ],
+
+  // สำรองอัตโนมัติ ตี 1 เวลาไทย
+  "triggers": {
+    "crons": ["0 18 * * *"]
+  },
+
   "observability": {
     "enabled": true
   }
